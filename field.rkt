@@ -1,10 +1,10 @@
 #lang racket/base
 ;; Exact arithmetic in the cyclotomic field Q(zeta_n) = Q[x]/Phi_n(x).
 ;;
-;; Racket's numeric tower is exact by default, so this module does not have to
-;; defend against floating point the way a Python version does -- 1/6 here IS
-;; the rational one sixth. The one thing worth guarding is a caller handing in
-;; an inexact number, which `exact-rational?` in the contracts rejects outright.
+;; Racket's numeric tower is exact by default: 1/6 here IS the rational one
+;; sixth, and inexactness is the thing a caller has to ask for. So this module
+;; does not have to defend the arithmetic, only the boundary -- an inexact
+;; number handed in, which `exact-rational?` in the contracts rejects outright.
 ;;
 ;; An element is a vector of phi(n) exact rationals in the power basis
 ;; 1, zeta, ..., zeta^(phi(n)-1).

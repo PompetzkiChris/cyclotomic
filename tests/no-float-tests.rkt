@@ -90,5 +90,45 @@
                 (lambda () (dec 0.5))   ; FLOAT-OK: dec must refuse a flonum
                 "dec refuses a flonum rather than rendering it"))))
 
+;; Racket and CUDA C++, and nothing else. Enforced rather than intended: a
+;; helper script in some other language is exactly the thing that creeps in
+;; when nobody is checking, and then it is a dependency.
+(define two-languages-tests
+  (test-suite
+   "Racket and CUDA C++ only"
+   (let* ([files (for/list ([p (in-directory root)]
+                            #:unless (regexp-match? #rx"compiled|[.]git" (path->string p))
+                            #:when (file-exists? p))
+                   p)]
+          [exts (for/list ([f (in-list files)])
+                  (let ([s (path->string f)])
+                    (cond [(regexp-match #rx"[.]([A-Za-z0-9]+)$" s) => cadr]
+                          [else ""])))]
+          ;; source we ship
+          [source-exts '("rkt" "cu" "ptx" "md" "gitignore" "")]
+          ;; things a build leaves behind; not shipped, and .gitignore excludes them
+          [artifact-exts '("exe" "lib" "exp" "obj" "pdb" "zmat" "mat")]
+          [stray (for/list ([f (in-list files)] [e (in-list exts)]
+                            #:unless (or (member e source-exts)
+                                         (member e artifact-exts)))
+                   (format "~a" (file-name-from-path f)))]
+          [foreign (for/list ([f (in-list files)] [e (in-list exts)]
+                              #:when (member e '("py" "pyc" "pyw" "ipynb" "js" "mjs"
+                                                 "ts" "sh" "bash" "bat" "cmd" "ps1"
+                                                 "pl" "rb" "lua")))
+                     (format "~a" (file-name-from-path f)))])
+     (printf "  source extensions: ~a\n"
+             (sort (remove-duplicates
+                    (filter (lambda (e) (member e source-exts)) exts))
+                   string<?))
+     (for ([s (in-list stray)]) (printf "  STRAY: ~a\n" s))
+     (for ([s (in-list foreign)]) (printf "  FOREIGN LANGUAGE: ~a\n" s))
+     (check-equal? foreign '()
+                   "no script in any language other than Racket and CUDA C++")
+     (check-equal? stray '()
+                   "no file outside .rkt, .cu, .ptx, .md and build artifacts"))))
+
 (module+ test
-  (void (run-tests (test-suite "no-float" source-tests ptx-tests value-tests))))
+  (void (run-tests (test-suite "no-float"
+                               source-tests ptx-tests value-tests
+                               two-languages-tests))))

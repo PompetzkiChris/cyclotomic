@@ -4,7 +4,7 @@
 ;; The driver API rather than the runtime API, deliberately: it is a stable C
 ;; ABI, it needs no host compiler at run time, and it loads PTX directly. That
 ;; means Racket can own the whole pipeline -- allocate, upload, launch, read
-;; back -- with no Python and no C shim in the path.
+;; back -- with no C shim and no other runtime in the path.
 ;;
 ;; Every entry point is checked. A CUDA error raises a Racket exception
 ;; carrying the driver's own message, so a failure is never silent.

@@ -1,7 +1,7 @@
 # `cyclotomic` — exact arithmetic in ℚ(ζₙ), in Racket
 
-Racket 9.3 [cs]. **297 tests, all passing.** Racket drives the GPU directly
-through the CUDA driver API; there is no Python anywhere in this path.
+Racket 9.3 [cs]. **299 tests, all passing.** Racket and CUDA C++, and nothing
+else: Racket drives the GPU directly through the CUDA driver API.
 
 ```
 raco pkg install --link C:\GPU\pkg-cyclotomic
@@ -12,8 +12,8 @@ raco test --package cyclotomic
 
 Racket's numeric tower is **exact by default**. `1/6` is the rational one
 sixth, not a float that happens to print that way. Inexactness is the thing you
-have to ask for, with `exact->inexact`. The test suite makes the distinction
-explicit:
+have to ask for, with `exact->inexact`. So the arithmetic needs no defending;
+only the boundary does. The test suite makes the distinction explicit:
 
 ```racket
 (check-equal? v 1/6)                       ; passes
@@ -44,7 +44,7 @@ tests/
   mub-tests.rkt          31
   accel-tests.rkt        23
   hardening-tests.rkt     9
-  no-float-tests.rkt     15
+  no-float-tests.rkt     17
   nvrtc-tests.rkt        37
 tools/          probe, bench, profile, audit, sustained, waitmode, kernelcmp
 refcheck/       an independent CUDA C++ implementation to check against
@@ -373,10 +373,15 @@ refcheck cmp on our output: IDENTICAL: 8192 coefficients
 
 ## Status
 
+Two languages, and a test that keeps it that way: `no-float-tests.rkt` walks the
+tree and fails on any source file that is not `.rkt`, `.cu`, `.ptx` or `.md`,
+naming any script in another language outright. A helper in some third language
+is exactly what creeps in when nobody is checking, and then it is a dependency.
+
 Done: the field, matrices, MUB verification, the CUDA driver binding, NVRTC,
 streams and pinned memory, four measured kernels, the accelerator on the math
 path, device-resident chaining, the no-float enforcement, and an independent
-C++ cross-check. 297 tests.
+C++ cross-check. 299 tests.
 
 Not done, stated rather than hidden: the planes are still *stored* as int64, so
 global read traffic is unchanged and only the shared tiles and the multiply got
