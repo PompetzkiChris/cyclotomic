@@ -74,16 +74,23 @@
   (define-values (ok msg)
     (run "mul" (path->string pa) (path->string pb) (path->string pc)))
 
-  (define ours (gpu-matmul A B))
   (define theirs (and ok (zmat-read F pc)))
-  (define match?
-    (and theirs (equal? (zmat-planes ours) (zmat-planes theirs))))
+  ;; every kernel mode must match the independent reference. A fast path that
+  ;; is only ever checked against itself is not checked.
+  (define per-mode
+    (for/list ([m (in-list '(split fused rb w32))])
+      (define ours (parameterize ([current-gpu-kernel m]) (gpu-matmul A B)))
+      (cons m (and theirs (equal? (zmat-planes ours) (zmat-planes theirs))))))
+  (define match? (for/and ([q (in-list per-mode)]) (cdr q)))
   (unless match? (set! fails (add1 fails)))
-  (printf "Q(z~a)\t~ax~a\t~a\t~a\t~a\n" ncyc sz sz bits
+  (printf "Q(z~a)	~ax~a	~a	~a	~a
+" ncyc sz sz bits
           (if ok "ok" "FAILED")
-          (cond [match? "IDENTICAL"]
+          (cond [match? "ALL 4 KERNELS IDENTICAL"]
                 [(not theirs) "-"]
-                [else "DIFFER"]))
+                [else (format "DIFFER ~a"
+                              (for/list ([q (in-list per-mode)] #:unless (cdr q))
+                                (car q)))]))
   (for ([p (in-list (list pa pb pc))]) (when (file-exists? p) (delete-file p))))
 
 ;; the reference's own comparator, on a product it did not produce

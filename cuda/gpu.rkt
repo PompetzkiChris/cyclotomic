@@ -33,9 +33,16 @@
          int64-max
          current-gpu-ready?
          gpu-stats gpu-reset-stats! gpu-stats-report
+         current-gpu-kernel
          ;; device-resident matrices: upload once, multiply many times
          (struct-out dmat)
          zmat->dmat dmat->zmat dmat-free! call-with-dmat dmat*)
+
+;; Which kernel runs a product. 'fused is one launch for the whole field
+;; product; 'split is the original deg^2 launches. Both are exact and are
+;; checked against each other; the selector exists so that can be tested and so
+;; a field with deg > 8 can still run.
+(define current-gpu-kernel (make-parameter 'auto))
 
 ;; Usage counters. "Did this actually run on the card" should be a number, not
 ;; a belief, so every product records what it did.
@@ -83,6 +90,10 @@
 (define k-plane-madd #f)
 (define k-zero #f)
 (define k-absmax #f)
+(define k-fused #f)
+(define k-rb #f)
+(define k-w32 #f)
+(define k-narrow #f)
 (define flush-handle #f)
 
 ;; The Phi_n reduction table is the same for every product over a given field,
@@ -135,6 +146,10 @@
     (set! k-plane-madd (module-function mod "plane_madd"))
     (set! k-zero (module-function mod "zero_i64"))
     (set! k-absmax (module-function mod "absmax_i64"))
+    (set! k-fused (module-function mod "fused_madd"))
+    (set! k-rb (module-function mod "plane_madd_rb"))
+    (set! k-w32 (module-function mod "plane_madd_w32"))
+    (set! k-narrow (module-function mod "narrow_i64_i32"))
     ;; Release the context even if the program exits without calling shutdown.
     ;; Registered once, not once per init/shutdown cycle.
     (unless flush-handle
@@ -149,7 +164,7 @@
     (when mod (void (unload-module! mod)))
     (context-destroy! ctx)
     (set! ctx #f) (set! mod #f)
-    (set! k-plane-madd #f) (set! k-zero #f) (set! k-absmax #f))
+    (set! k-plane-madd #f) (set! k-zero #f) (set! k-absmax #f) (set! k-fused #f) (set! k-rb #f) (set! k-w32 #f) (set! k-narrow #f))
   (when flush-handle
     (plumber-flush-handle-remove! flush-handle)
     (set! flush-handle #f))
@@ -279,21 +294,9 @@
               "|C| could reach ~a > int64 max ~a; this product needs the RNS path"
               bound int64-max))
 
-     ;; zero the accumulator
-     (launch! k-zero (list 1024 1 1) (list 256 1 1)
-              (list (cons 'u64 dC) (cons 'u64 nC)))
-
      (define grid (list (ceil-div c 16) (ceil-div n 16) 1))
      (define block (list 16 16 1))
-     (for* ([i (in-range d)] [j (in-range d)])
-       (define m (+ i j))
-       (launch! k-plane-madd grid block
-                (list (cons 'u64 (+ dA (* 8 i n k)))
-                      (cons 'u64 (+ dB (* 8 j k c)))
-                      (cons 'u64 dC)
-                      (cons 'u64 (+ dR (* 4 m d)))
-                      (cons 'i32 n) (cons 'i32 k) (cons 'i32 c)
-                      (cons 'i32 d) (cons 'u64 stride))))
+     (define launches (run-product! dA dB dC dR d n k c stride grid block maxA maxB))
      (synchronize!)
 
      (when audit?
@@ -306,7 +309,7 @@
      (copy-from-device! out dC)
      (set! stat-down-bytes (+ stat-down-bytes (bytes-length out)))
      (set! stat-matmuls (add1 stat-matmuls))
-     (set! stat-launches (+ stat-launches 1 (* d d)))
+     (set! stat-launches (+ stat-launches launches))
      (set! stat-elements (+ stat-elements (* n c)))
      (set! stat-device-ms (+ stat-device-ms
                              (- (current-inexact-milliseconds) t-start)))
@@ -375,25 +378,89 @@
 
   (define dC (device-alloc (* nC 8)))
   (with-handlers ([(lambda (e) #t) (lambda (e) (device-free! dC) (raise e))])
-    (launch! k-zero (list 1024 1 1) (list 256 1 1)
-             (list (cons 'u64 dC) (cons 'u64 nC)))
     (define grid (list (ceil-div c 16) (ceil-div n 16) 1))
     (define block (list 16 16 1))
-    (for* ([i (in-range d)] [j (in-range d)])
-      (launch! k-plane-madd grid block
-               (list (cons 'u64 (+ dA (* 8 i n k)))
-                     (cons 'u64 (+ dB (* 8 j k c)))
-                     (cons 'u64 dC)
-                     (cons 'u64 (+ dR (* 4 (+ i j) d)))
-                     (cons 'i32 n) (cons 'i32 k) (cons 'i32 c)
-                     (cons 'i32 d) (cons 'u64 stride))))
+    (define launches (run-product! dA dB dC dR d n k c stride grid block maxA maxB))
     (synchronize!)
     (when audit?
       (define peak (gpu-absmax dC nC))
       (when (> peak bound)
         (error 'dmat* "post-hoc audit failed: |C| = ~a exceeds ~a" peak bound)))
     (set! stat-matmuls (add1 stat-matmuls))
-    (set! stat-launches (+ stat-launches 1 (* d d)))
+    (set! stat-launches (+ stat-launches launches))
     (set! stat-elements (+ stat-elements (* n c)))
     (set! stat-device-ms (+ stat-device-ms (- (current-inexact-milliseconds) t-start)))
     (dmat f n c dC)))
+
+;; Issue the kernels for one product; returns the number of launches made.
+(define int32-max (sub1 (expt 2 31)))
+
+(define (run-product! dA dB dC dR d n k c stride grid block [maxA #f] [maxB #f])
+  (define mode
+    (let ([m (current-gpu-kernel)])
+      (if (eq? m 'auto)
+          ;; narrow operands are the fast path when they fit; otherwise the
+          ;; register-blocked int64 kernel
+          (if (and maxA maxB (< maxA int32-max) (< maxB int32-max)) 'w32 'rb)
+          m)))
+  (cond
+    [(eq? mode 'w32)
+     ;; narrow both operands to int32, then one IMAD per multiply-add
+     (define nA (* d n k))
+     (define nB (* d k c))
+     (call-with-device-buffers
+      (list (* nA 4) (* nB 4))
+      (lambda (wA wB)
+        (launch! k-narrow (list 1024 1 1) (list 256 1 1)
+                 (list (cons 'u64 dA) (cons 'u64 wA) (cons 'u64 nA)))
+        (launch! k-narrow (list 1024 1 1) (list 256 1 1)
+                 (list (cons 'u64 dB) (cons 'u64 wB) (cons 'u64 nB)))
+        (launch! k-zero (list 1024 1 1) (list 256 1 1)
+                 (list (cons 'u64 dC) (cons 'u64 (* d stride))))
+        (define g (list (ceil-div c 64) (ceil-div n 64) 1))
+        (define b (list 16 16 1))
+        (for* ([i (in-range d)] [j (in-range d)])
+          (launch! k-w32 g b
+                   (list (cons 'u64 (+ wA (* 4 i n k)))
+                         (cons 'u64 (+ wB (* 4 j k c)))
+                         (cons 'u64 dC)
+                         (cons 'u64 (+ dR (* 4 (+ i j) d)))
+                         (cons 'i32 n) (cons 'i32 k) (cons 'i32 c)
+                         (cons 'i32 d) (cons 'u64 stride))))
+        ;; the copy-back must finish before the narrowed buffers are released
+        (synchronize!)))
+     (+ 3 (* d d))]
+    [(and (eq? mode 'fused) (<= d 8))
+     ;; one launch: all planes staged in shared memory, raw convolution in
+     ;; registers, R folded once
+     (launch! k-fused grid block
+              (list (cons 'u64 dA) (cons 'u64 dB) (cons 'u64 dC) (cons 'u64 dR)
+                    (cons 'i32 n) (cons 'i32 k) (cons 'i32 c) (cons 'i32 d)))
+     1]
+    [(eq? mode 'rb)
+     ;; register-blocked: 64x64 output tile per block, 4x4 per thread
+     (launch! k-zero (list 1024 1 1) (list 256 1 1)
+              (list (cons 'u64 dC) (cons 'u64 (* d stride))))
+     (define g (list (ceil-div c 64) (ceil-div n 64) 1))
+     (define b (list 16 16 1))
+     (for* ([i (in-range d)] [j (in-range d)])
+       (launch! k-rb g b
+                (list (cons 'u64 (+ dA (* 8 i n k)))
+                      (cons 'u64 (+ dB (* 8 j k c)))
+                      (cons 'u64 dC)
+                      (cons 'u64 (+ dR (* 4 (+ i j) d)))
+                      (cons 'i32 n) (cons 'i32 k) (cons 'i32 c)
+                      (cons 'i32 d) (cons 'u64 stride))))
+     (add1 (* d d))]
+    [else
+     (launch! k-zero (list 1024 1 1) (list 256 1 1)
+              (list (cons 'u64 dC) (cons 'u64 (* d stride))))
+     (for* ([i (in-range d)] [j (in-range d)])
+       (launch! k-plane-madd grid block
+                (list (cons 'u64 (+ dA (* 8 i n k)))
+                      (cons 'u64 (+ dB (* 8 j k c)))
+                      (cons 'u64 dC)
+                      (cons 'u64 (+ dR (* 4 (+ i j) d)))
+                      (cons 'i32 n) (cons 'i32 k) (cons 'i32 c)
+                      (cons 'i32 d) (cons 'u64 stride))))
+     (add1 (* d d))]))
