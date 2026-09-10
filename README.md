@@ -1,6 +1,6 @@
 # `cyclotomic` — exact arithmetic in ℚ(ζₙ), in Racket
 
-Racket 9.3 [cs]. **299 tests, all passing.** Racket and CUDA C++, and nothing
+Racket 9.3 [cs]. **313 tests, all passing.** Racket and CUDA C++, and nothing
 else: Racket drives the GPU directly through the CUDA driver API.
 
 ```
@@ -22,6 +22,43 @@ only the boundary does. The test suite makes the distinction explicit:
 
 The exact rational and the nearest double to it are different objects, and
 Racket says so.
+
+## Delay on, delay off
+
+Requiring a module must not *do* anything. Locating a DLL touches the
+filesystem, opening it loads code, and making its dependencies findable mutates
+the process PATH — and `cuda/nvrtc.rkt` did all three in its module body, so a
+program that required the package and never compiled a kernel still paid for it
+and still had its environment changed underneath it. Measured, before:
+
+```
+require nvrtc.rkt       : 101 ms
+PATH mutated by require : #t
+```
+
+Everything derived now sits behind a promise: computed at most once, on first
+use, and not at all if never used.
+
+```
+require nvrtc.rkt       :   5 ms      PATH mutated by require : #f
+first use               :   7 ms      PATH mutated after use  : #t
+```
+
+The same applies to the field. `Φₙ`'s power table and unit group are pure
+functions of `n`, wanted often but not always, and building them eagerly made
+`make-field` do `O(n · φ(n))` work for a caller that only wanted the degree:
+
+```
+n=1260 deg  288 : make 15 ms, power table on demand   0 ms
+n=2520 deg  576 : make  3 ms, power table on demand   5 ms
+n=5040 deg 1152 : make  9 ms, power table on demand 121 ms
+```
+
+Each table is one `delay`, so it is built at most once and every later access is
+a field read — `(eq? (cyclofield-pow F) (cyclofield-pow F))` is `#t`, tested.
+`tests/purity-tests.rkt` checks that requiring `nvrtc.rkt` leaves PATH alone,
+that the effect appears only on first use, and that a promise forced three times
+computes once.
 
 ## Layout
 
@@ -46,6 +83,7 @@ tests/
   hardening-tests.rkt     9
   no-float-tests.rkt     17
   nvrtc-tests.rkt        37
+  purity-tests.rkt       14
 tools/          probe, bench, profile, audit, sustained, waitmode, kernelcmp
 refcheck/       an independent CUDA C++ implementation to check against
 ```
@@ -381,7 +419,7 @@ is exactly what creeps in when nobody is checking, and then it is a dependency.
 Done: the field, matrices, MUB verification, the CUDA driver binding, NVRTC,
 streams and pinned memory, four measured kernels, the accelerator on the math
 path, device-resident chaining, the no-float enforcement, and an independent
-C++ cross-check. 299 tests.
+C++ cross-check. 313 tests.
 
 Not done, stated rather than hidden: the planes are still *stored* as int64, so
 global read traffic is unchanged and only the shared tiles and the multiply got

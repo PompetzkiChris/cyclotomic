@@ -12,6 +12,7 @@
 (require racket/vector
          racket/string
          racket/contract
+         racket/promise
          (only-in math/number-theory coprime?)
          "poly.rkt")
 
@@ -22,6 +23,8 @@
 (provide
  exact-rational?
  (struct-out cyclofield)
+ cyclofield-pow
+ cyclofield-units
  (contract-out
   [make-field       (-> exact-positive-integer? cyclofield?)]
   [field-degree     (-> cyclofield? exact-positive-integer?)]
@@ -62,15 +65,45 @@
 ;; n        : the order of the root of unity
 ;; deg      : phi(n)
 ;; phi      : coefficients of Phi_n, low to high
-;; pow      : vector of vectors; pow[m] is zeta^m in the power basis
-;; units    : the k in [1,n] with gcd(k,n)=1, i.e. the Galois group
-(struct cyclofield (n deg phi pow units)
+;; pow-p    : PROMISE of a vector of vectors; pow[m] is zeta^m in the power basis
+;; units-p  : PROMISE of the k in [1,n] with gcd(k,n)=1, the Galois group
+;;
+;; The two tables are derived data: a pure function of n, wanted often but not
+;; always. Building them eagerly makes `make-field` do O(n * phi(n)) work for a
+;; caller that only asked for the degree. Behind a promise they are computed at
+;; most once, on first use, and every later access is a field read. delay on,
+;; delay off.
+(struct cyclofield (n deg phi pow-p units-p)
   #:transparent
   #:methods gen:custom-write
   [(define (write-proc f port mode)
      (fprintf port "#<Q(zeta_~a) degree ~a>" (cyclofield-n f) (cyclofield-deg f)))])
 
+(define (cyclofield-pow f) (force (cyclofield-pow-p f)))
+(define (cyclofield-units f) (force (cyclofield-units-p f)))
+
 (define field-cache (make-hasheqv))
+
+;; zeta^m in the power basis, m = 0 .. max(n, 2*deg). Pure in (n, phi, deg).
+(define (build-power-table n phi deg)
+  (define size (add1 (max n (* 2 deg))))
+  (define pow (make-vector size #f))
+  (for ([j (in-range (min deg size))])
+    (define v (make-vector deg 0))
+    (vector-set! v j 1)
+    (vector-set! pow j v))
+  ;; zeta^m = shift(zeta^(m-1)), reduced by x^deg = -(phi_0 + ... )
+  (for ([m (in-range deg size)])
+    (define prev (vector-ref pow (sub1 m)))
+    (define top (vector-ref prev (sub1 deg)))
+    (define v (make-vector deg 0))
+    (for ([j (in-range 1 deg)])
+      (vector-set! v j (vector-ref prev (sub1 j))))
+    (unless (zero? top)
+      (for ([j (in-range deg)])
+        (vector-set! v j (- (vector-ref v j) (* top (vector-ref phi j))))))
+    (vector-set! pow m v))
+  pow)
 
 (define (make-field n)
   (hash-ref!
@@ -80,26 +113,9 @@
      (define deg (sub1 (vector-length phi)))
      (unless (= 1 (vector-ref phi deg))
        (error 'make-field "Phi_~a is not monic" n))
-     (define size (add1 (max n (* 2 deg))))
-     (define pow (make-vector size #f))
-     ;; zeta^j = e_j for j < deg
-     (for ([j (in-range (min deg size))])
-       (define v (make-vector deg 0))
-       (vector-set! v j 1)
-       (vector-set! pow j v))
-     ;; zeta^m = shift(zeta^(m-1)), reduced by x^deg = -(phi_0 + ... )
-     (for ([m (in-range deg size)])
-       (define prev (vector-ref pow (sub1 m)))
-       (define top (vector-ref prev (sub1 deg)))
-       (define v (make-vector deg 0))
-       (for ([j (in-range 1 deg)])
-         (vector-set! v j (vector-ref prev (sub1 j))))
-       (unless (zero? top)
-         (for ([j (in-range deg)])
-           (vector-set! v j (- (vector-ref v j) (* top (vector-ref phi j))))))
-       (vector-set! pow m v))
-     (define units (for/list ([k (in-range 1 (add1 n))] #:when (coprime? k n)) k))
-     (cyclofield n deg phi pow units))))
+     (cyclofield n deg phi
+                 (delay (build-power-table n phi deg))
+                 (delay (for/list ([k (in-range 1 (add1 n))] #:when (coprime? k n)) k))))))
 
 (define (field-degree f) (cyclofield-deg f))
 

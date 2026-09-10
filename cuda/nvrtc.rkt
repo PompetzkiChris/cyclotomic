@@ -18,6 +18,7 @@
 ;; and the reason rather than just failing.
 
 (require ffi/unsafe
+         racket/promise
          ffi/unsafe/define
          racket/list
          racket/string)
@@ -38,12 +39,28 @@
          preprocessor-lines)
 
 
+;; ---------------------------------------------------------------------------
+;; Nothing happens when this module is required.
+;;
+;; Locating NVRTC touches the filesystem, opening it loads a DLL, and making its
+;; builtins findable mutates the process PATH. Doing any of that at module
+;; instantiation means `(require "nvrtc.rkt")` has observable global effects for
+;; a program that never compiles a kernel -- which it did, until this was
+;; measured: requiring the module changed PATH and cost 101 ms.
+;;
+;; All of it now sits behind promises: computed at most once, on first use, and
+;; never at all if NVRTC is never touched. delay on, delay off.
+;; ---------------------------------------------------------------------------
+
 ;; Built with build-path rather than written as a string literal, so no one has
 ;; to think about backslash escaping.
-(define default-cuda-root
-  (let ([p (build-path "C:" "Program Files" "NVIDIA GPU Computing Toolkit"
-                       "CUDA" "v13.4")])
-    (and (directory-exists? p) (path->string p))))
+(define default-cuda-root-p
+  (delay
+    (let ([p (build-path "C:" "Program Files" "NVIDIA GPU Computing Toolkit"
+                         "CUDA" "v13.4")])
+      (and (directory-exists? p) (path->string p)))))
+
+(define (default-cuda-root) (force default-cuda-root-p))
 
 ;; NVRTC's file name carries a major version that does not track the toolkit
 ;; version, and on Windows it lives in the toolkit's bin directory rather than
@@ -54,7 +71,7 @@
     (filter values
             (list (getenv "CUDA_PATH")
                   (getenv "CUDA_HOME")
-                  default-cuda-root)))
+                  (default-cuda-root))))
   (define dirs
     (append*
      (for/list ([r (in-list roots)])
@@ -78,7 +95,7 @@
   (define roots
     (filter values (list (getenv "CUDA_PATH")
                          (getenv "CUDA_HOME")
-                         default-cuda-root)))
+                         (default-cuda-root))))
   (define dirs
     (for*/list ([r (in-list roots)]
                 [sub (in-list (list (build-path r "bin" "x64") (build-path r "bin")))]
@@ -90,17 +107,31 @@
     (unless (null? missing)
       (putenv "PATH" (string-append (string-join missing ";") ";" cur)))))
 
-(define nvrtc-lib
-  (begin
+;; Forced on first use, never by a bare require. The PATH change and the DLL
+;; load happen here, inside the promise, or not at all.
+(define nvrtc-lib-p
+  (delay
     (add-toolkit-dirs-to-path!)
     (for/or ([c (in-list (nvrtc-candidates))])
       (with-handlers ([exn:fail? (lambda (e) #f)])
         (ffi-lib c)))))
 
-(define (nvrtc-available?) (and nvrtc-lib #t))
+(define (nvrtc-lib) (force nvrtc-lib-p))
 
-(define-ffi-definer define-nv (or nvrtc-lib (ffi-lib #f))
-  #:default-make-fail make-not-available)
+(define (nvrtc-available?) (and (nvrtc-lib) #t))
+
+;; Each binding is its own promise: resolved the first time that particular
+;; function is called, and not at module instantiation. A program that requires
+;; this module and never compiles anything does no work and loads no library.
+(define-syntax-rule (define-nv name type)
+  (define name
+    (let ([p (delay (let ([lib (nvrtc-lib)])
+                      (and lib (get-ffi-obj 'name lib type (lambda () #f)))))])
+      (lambda args
+        (define f (force p))
+        (unless f
+          (error 'name "NVRTC is not available on this machine"))
+        (apply f args)))))
 
 (define _nvrtcResult _int32)
 (define _nvrtcProgram (_cpointer/null 'nvrtcProgram))
@@ -264,7 +295,7 @@
   (void))
 
 (define (nvrtc-version)
-  (unless nvrtc-lib (error 'nvrtc-version "NVRTC not found"))
+  (unless (nvrtc-lib) (error 'nvrtc-version "NVRTC not found"))
   (define-values (r maj min) (nvrtcVersion))
   (check 'nvrtcVersion r)
   (values maj min))
@@ -293,7 +324,7 @@
                           #:name [name "kernel.cu"]
                           #:arch [arch "compute_120"]
                           #:options [extra '()])
-  (unless nvrtc-lib (error 'compile-cuda "NVRTC not found; is the CUDA toolkit installed?"))
+  (unless (nvrtc-lib) (error (quote compile-cuda) "NVRTC not found; is the CUDA toolkit installed?"))
   ;; The preprocessor could hide a float behind a name, so it is refused.
   (let ([pp (preprocessor-lines src)])
     (unless (null? pp)
