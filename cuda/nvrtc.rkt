@@ -33,7 +33,9 @@
          exn:fail:cuda-float-hits
          ptx-float-hits
          assert-no-float!
-         source-float-hits)
+         source-float-hits
+         strip-noncode
+         preprocessor-lines)
 
 
 ;; Built with build-path rather than written as a string literal, so no one has
@@ -150,20 +152,87 @@
   #px"[.](f16x2|bf16x2|f16|bf16|f32|f64|tf32)\\b|%f[0-9]|%fd[0-9]|\\b0[dDfF][0-9A-Fa-f]{8}")
 
 
-;; A second, weaker layer. The PTX check is the guarantee: it says no float
-;; INSTRUCTION will execute on the device. It does not say no float was ever
-;; involved -- NVRTC will constant-fold a float expression whose operands are
-;; all compile-time known, and what reaches the PTX is then just an integer.
+;; The source layer, airtight rather than advisory.
 ;;
-;; So the source is also scanned for float types before compiling. This is
-;; defeatable by a macro or an include and is not claimed to be airtight; it is
-;; here so that source which is obviously about floats is rejected on sight
-;; rather than silently folded into something acceptable.
-(define source-float-rx
-  #px"\\b(float|double|__half2?|__nv_bfloat16(2)?|half2?)\\b|\\b[0-9]+[.][0-9]*[fF]?\\b|\\b[0-9]+[eE][-+]?[0-9]+\\b")
+;; The PTX check alone guarantees only that no float INSTRUCTION executes. It
+;; does not guarantee no float was ever involved, because NVRTC constant-folds
+;; a float expression whose operands are compile-time known and emits an
+;; integer. For the stronger claim, no float may reach the compiler at all.
+;;
+;; Two things could hide one from a scan of the text:
+;;
+;;   The preprocessor. A #define could rename float to anything and an #include
+;;   could drag in a header full of them, so preprocessor directives are
+;;   refused outright. The source handed in IS the translation unit that gets
+;;   compiled. NVRTC has no standard headers to include anyway.
+;;
+;;   Spellings that do not literally say "float". Every float-producing name in
+;;   CUDA carries one of a small set of substrings -- including the conversion
+;;   intrinsics that manufacture a float out of an integer bit pattern, such as
+;;   __int_as_float, __uint_as_float and __int2half_rn. Those substrings are
+;;   rejected case-insensitively, along with every way of writing a float
+;;   literal, hex-float notation included.
+;;
+;; Comments and string literals are stripped first so prose cannot trip it.
+;;
+;; A float therefore cannot be named, written as a literal, manufactured from
+;; an integer, or smuggled in behind a macro. With the PTX check downstream, no
+;; float is involved at any stage.
+
+;; Remove comments and string/char literals so their contents are not scanned.
+(define (strip-noncode src)
+  (define n (string-length src))
+  (define out (open-output-string))
+  (define (at i) (and (< i n) (string-ref src i)))
+  (let loop ([i 0] [mode 'code])
+    (cond
+      [(>= i n) (void)]
+      [(eq? mode 'code)
+       (cond
+         [(and (eqv? (at i) #\/) (eqv? (at (add1 i)) #\*)) (loop (+ i 2) 'block)]
+         [(and (eqv? (at i) #\/) (eqv? (at (add1 i)) #\/)) (loop (+ i 2) 'line)]
+         [(eqv? (at i) #\") (write-char #\space out) (loop (add1 i) 'str)]
+         [(eqv? (at i) #\') (write-char #\space out) (loop (add1 i) 'chr)]
+         [else (write-char (at i) out) (loop (add1 i) 'code)])]
+      [(eq? mode 'block)
+       (cond
+         [(and (eqv? (at i) #\*) (eqv? (at (add1 i)) #\/))
+          (write-char #\space out)
+          (loop (+ i 2) 'code)]
+         [else
+          (when (eqv? (at i) #\newline) (write-char #\newline out))
+          (loop (add1 i) 'block)])]
+      [(eq? mode 'line)
+       (cond
+         [(eqv? (at i) #\newline) (write-char #\newline out) (loop (add1 i) 'code)]
+         [else (loop (add1 i) 'line)])]
+      [(eq? mode 'str)
+       (cond
+         [(eqv? (at i) #\\) (loop (+ i 2) 'str)]
+         [(eqv? (at i) #\") (loop (add1 i) 'code)]
+         [else (loop (add1 i) 'str)])]
+      [else
+       (cond
+         [(eqv? (at i) #\\) (loop (+ i 2) 'chr)]
+         [(eqv? (at i) #\') (loop (add1 i) 'code)]
+         [else (loop (add1 i) 'chr)])]))
+  (get-output-string out))
+
+(define float-word-rx #px"(?i:float|double|half|bfloat|fp16|fp8|tf32|_Float|__fp16)")
+
+(define float-literal-rx
+  #px"[0-9]+[.][0-9]*|[.][0-9]+|[0-9]+[eE][-+]?[0-9]+|0[xX][0-9A-Fa-f]*[pP][-+]?[0-9]+")
+
+(define (preprocessor-lines src)
+  (for/list ([line (in-list (regexp-split #rx"\n" src))]
+             [i (in-naturals 1)]
+             #:when (regexp-match? #px"^[ \t]*#" line))
+    (cons i line)))
 
 (define (source-float-hits src)
-  (regexp-match* source-float-rx src))
+  (define code (strip-noncode src))
+  (append (regexp-match* float-word-rx code)
+          (regexp-match* float-literal-rx code)))
 
 (define (ptx-float-hits ptx)
   (define txt (if (bytes? ptx) (bytes->string/utf-8 ptx #\?) ptx))
@@ -225,6 +294,14 @@
                           #:arch [arch "compute_120"]
                           #:options [extra '()])
   (unless nvrtc-lib (error 'compile-cuda "NVRTC not found; is the CUDA toolkit installed?"))
+  ;; The preprocessor could hide a float behind a name, so it is refused.
+  (let ([pp (preprocessor-lines src)])
+    (unless (null? pp)
+      (raise (exn:fail:cuda-float
+              (format "compile-cuda: preprocessor directives are not allowed. A #define could rename float and an #include could bring in a header full of them, either of which would put a float past the source check. Line ~a: ~a"
+                      (car (car pp)) (string-trim (cdr (car pp))))
+              (current-continuation-marks)
+              (map cdr pp)))))
   ;; reject on sight before compiling, so a float expression cannot be quietly
   ;; folded into an acceptable-looking integer
   (let ([shits (source-float-hits src)])

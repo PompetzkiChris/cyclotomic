@@ -224,6 +224,38 @@ EOF
      (let ([hits (source-float-hits SNEAKY)])
        (check-true (> (length hits) 0) "the source scan sees the folded float"))
 
+     ;; every way of naming or manufacturing a float, including the intrinsics
+     ;; that build one out of an integer bit pattern with no literal in sight
+     (for ([probe (in-list (list (cons "float" "typedef float R;")
+                                 (cons "double" "double x;")
+                                 (cons "__half" "__half h;")
+                                 (cons "__nv_bfloat16" "__nv_bfloat16 b;")
+                                 (cons "__int_as_float" "x = __int_as_float(1065353216);")
+                                 (cons "__int2half_rn" "h = __int2half_rn(3);")
+                                 (cons "decimal literal" "x = 1.5;")
+                                 (cons "leading-dot literal" "x = .5;")
+                                 (cons "exponent literal" "x = 1e9;")
+                                 (cons "hex float literal" "x = 0x1.8p3;")))])
+       (check-true (> (length (source-float-hits (cdr probe))) 0)
+                   (format "source scan catches ~a" (car probe))))
+
+     ;; and does not fire on prose or on clean integer code
+     (check-equal? (source-float-hits "// mentions float and 1.5\nlong long a = 3;") '()
+                   "a comment about floats is not a float")
+     (check-equal? (source-float-hits "extern \"C\" __global__ void k(long long* v, long long n){ long long i = blockIdx.x; if (i<n) v[i] = v[i]*3 + 7; }")
+                   '()
+                   "clean integer kernel passes")
+
+     ;; the preprocessor is the other way a float could hide, so it is refused
+     (for ([d (in-list (list "#define REAL float\nlong long x;"
+                             "  #include <cmath>\nlong long x;"))])
+       (define e (with-handlers ([exn:fail:cuda-float? values])
+                   (compile-cuda d #:arch arch)
+                   #f))
+       (check-true (exn:fail:cuda-float? e)
+                   (format "compile-cuda refuses ~a"
+                           (car (string-split (string-trim d) "\n")))))
+
      ;; and the other door: hand load-ptx float PTX directly
      (let ([e (with-handlers ([exn:fail? values])
                 ;; FLOAT-OK: this PTX is deliberately float, to be refused
