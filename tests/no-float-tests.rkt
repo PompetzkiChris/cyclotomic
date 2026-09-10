@@ -96,8 +96,11 @@
 (define two-languages-tests
   (test-suite
    "Racket and CUDA C++ only"
+   ;; compiled/ and doc/ are build output, not source; scribble renders .js and
+   ;; .css into doc/ and flagging those would be flagging the renderer, not us
    (let* ([files (for/list ([p (in-directory root)]
-                            #:unless (regexp-match? #rx"compiled|[.]git" (path->string p))
+                            #:unless (regexp-match? #rx"compiled|[.]git|[\\/]doc[\\/]"
+                                                    (path->string p))
                             #:when (file-exists? p))
                    p)]
           [exts (for/list ([f (in-list files)])
@@ -105,7 +108,7 @@
                     (cond [(regexp-match #rx"[.]([A-Za-z0-9]+)$" s) => cadr]
                           [else ""])))]
           ;; source we ship
-          [source-exts '("rkt" "cu" "ptx" "md" "gitignore" "")]
+          [source-exts '("rkt" "scrbl" "cu" "ptx" "md" "gitignore" "")]
           ;; things a build leaves behind; not shipped, and .gitignore excludes them
           [artifact-exts '("exe" "lib" "exp" "obj" "pdb" "zmat" "mat")]
           [stray (for/list ([f (in-list files)] [e (in-list exts)]

@@ -8,5 +8,8 @@
 (define license 'MIT)
 (define deps '("base" "math-lib"))
 (define build-deps '("rackunit-lib" "racket-doc" "scribble-lib"))
+(define scribblings '(("scribblings/cyclotomic.scrbl" ())))
+;; tools/ are benchmarks and audits, refcheck/ needs a compiled .exe; neither is
+;; part of the library, and both are run by hand.
 (define test-omit-paths '("tools" "refcheck"))
 (define compile-omit-paths '("tools" "refcheck"))

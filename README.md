@@ -5,7 +5,8 @@ else: Racket drives the GPU directly through the CUDA driver API.
 
 ```
 raco pkg install --link C:\GPU\pkg-cyclotomic
-raco test --package cyclotomic
+raco setup --pkgs cyclotomic     # renders the Scribble docs
+raco test  --package cyclotomic
 ```
 
 ## Why Racket
@@ -85,6 +86,7 @@ tests/
   nvrtc-tests.rkt        37
   purity-tests.rkt       14
 tools/          probe, bench, profile, audit, sustained, waitmode, kernelcmp
+scribblings/    Scribble documentation; raco setup renders it
 refcheck/       an independent CUDA C++ implementation to check against
 ```
 
