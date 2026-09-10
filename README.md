@@ -1,6 +1,6 @@
 # `cyclotomic` — exact arithmetic in ℚ(ζₙ), in Racket
 
-Racket 9.3 [cs]. **245 tests, all passing.** Racket drives the GPU directly;
+Racket 9.3 [cs]. **283 tests, all passing.** Racket drives the GPU directly;
 there is no Python anywhere in this path.
 
 ```
@@ -45,6 +45,7 @@ cuda/
   kernels.cu    int64-only kernels; kernels.ptx is the compiled artifact
   gpu.rkt       exact Z[zeta_n] matrices on the device
   accel.rkt     installs the device onto mat*; declines safely
+  nvrtc.rkt     compile CUDA C++ from a Racket string, at run time
   probe.rkt     what the driver reports about this machine
   profile.rkt   where wall time actually goes
   sustained.rkt device-resident chaining, the load test
@@ -57,6 +58,8 @@ tests/
   mub-tests.rkt        31 tests
   hardening-tests.rkt    9 tests
   accel-tests.rkt       23 tests
+  no-float-tests.rkt    15 tests
+  nvrtc-tests.rkt       23 tests
 info.rkt        package definition
 ```
 

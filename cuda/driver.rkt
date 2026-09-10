@@ -28,6 +28,13 @@
          load-ptx unload-module! cuda-module? module-function cuda-function?
          release-sync-event!
          launch! synchronize! synchronize-blocking! current-gpu-wait
+         ;; streams, pinned host memory, async transfers
+         make-stream stream? stream-destroy! stream-synchronize!
+         pinned-alloc pinned-free! pinned-ptr pinned-bytes pinned?
+         call-with-pinned
+         copy-to-device/async! copy-from-device/async!
+         ;; launch configuration from the device, not from a guess
+         max-potential-block-size
          ATTR-MULTIPROCESSOR-COUNT
          ATTR-CLOCK-RATE
          ATTR-MEMORY-CLOCK-RATE
@@ -128,6 +135,28 @@
 (define-cu cuModuleGetFunction
   (_fun (out : (_ptr o _CUfunction)) _CUmodule _string/utf-8 -> (r : _CUresult)
         -> (values r out)))
+
+(define-cu cuStreamCreate
+  (_fun (out : (_ptr o _CUstream)) _uint32 -> (r : _CUresult) -> (values r out)))
+(define-cu cuStreamDestroy_v2 (_fun _CUstream -> _CUresult))
+(define-cu cuStreamSynchronize (_fun #:blocking? #t _CUstream -> _CUresult))
+(define-cu cuStreamQuery (_fun _CUstream -> _CUresult))
+
+;; Page-locked host memory. A pageable buffer forces the driver to stage the
+;; copy through its own pinned bounce buffer, which costs roughly half the
+;; achievable bandwidth and rules out a genuinely asynchronous transfer.
+(define-cu cuMemHostAlloc
+  (_fun (out : (_ptr o _pointer)) _size _uint32 -> (r : _CUresult) -> (values r out)))
+(define-cu cuMemFreeHost (_fun _pointer -> _CUresult))
+(define-cu cuMemcpyHtoDAsync_v2
+  (_fun _CUdeviceptr _pointer _size _CUstream -> _CUresult))
+(define-cu cuMemcpyDtoHAsync_v2
+  (_fun _pointer _CUdeviceptr _size _CUstream -> _CUresult))
+
+(define-cu cuOccupancyMaxPotentialBlockSize
+  (_fun (grid : (_ptr o _int32)) (block : (_ptr o _int32))
+        _CUfunction _pointer _size _int32
+        -> (r : _CUresult) -> (values r grid block)))
 
 (define-cu cuLaunchKernel
   (_fun #:blocking? #t
@@ -311,6 +340,67 @@
   (check 'cuMemcpyDtoH (cuMemcpyDtoH_v2 buf dptr n))
   (memcpy bs buf n))
 
+
+;; ------------------------------------------------------------------ streams
+
+(struct stream (ptr) #:transparent)
+
+(define (make-stream)
+  (define-values (r s) (cuStreamCreate 1))   ; CU_STREAM_NON_BLOCKING
+  (check 'cuStreamCreate r)
+  (stream s))
+
+(define (stream-destroy! s) (check 'cuStreamDestroy (cuStreamDestroy_v2 (stream-ptr s))))
+
+;; Poll rather than block, for the same reason synchronize! does.
+(define (stream-synchronize! s)
+  (let loop ([spins 0])
+    (define q (cuStreamQuery (stream-ptr s)))
+    (cond
+      [(zero? q) (void)]
+      [(= q CUDA_ERROR_NOT_READY)
+       (if (< spins 200000) (sleep 0) (sleep 1/2000))
+       (loop (add1 spins))]
+      [else (check 'cuStreamQuery q)])))
+
+;; ------------------------------------------------------- pinned host memory
+
+(struct pinned (ptr size) #:transparent
+  #:constructor-name make-pinned-record)
+
+(define (pinned-alloc nbytes)
+  (define-values (r p) (cuMemHostAlloc (max 1 nbytes) 0))
+  (check 'cuMemHostAlloc r)
+  (make-pinned-record p nbytes))
+
+(define (pinned-free! h) (check 'cuMemFreeHost (cuMemFreeHost (pinned-ptr h))))
+
+(define (pinned-bytes h [n #f])
+  (define k (or n (pinned-size h)))
+  (define bs (make-bytes k))
+  (memcpy bs (pinned-ptr h) k)
+  bs)
+
+(define (call-with-pinned nbytes proc)
+  (define h (pinned-alloc nbytes))
+  (dynamic-wind void (lambda () (proc h)) (lambda () (pinned-free! h))))
+
+(define (copy-to-device/async! dptr h nbytes s)
+  (check 'cuMemcpyHtoDAsync
+         (cuMemcpyHtoDAsync_v2 dptr (pinned-ptr h) nbytes (stream-ptr s))))
+
+(define (copy-from-device/async! h dptr nbytes s)
+  (check 'cuMemcpyDtoHAsync
+         (cuMemcpyDtoHAsync_v2 (pinned-ptr h) dptr nbytes (stream-ptr s))))
+
+;; Ask the driver what block size keeps this kernel occupied, instead of
+;; hardcoding 256 and hoping.
+(define (max-potential-block-size fn [dynamic-shared 0] [block-limit 0])
+  (define-values (r grid block)
+    (cuOccupancyMaxPotentialBlockSize (cuda-function-ptr fn) #f dynamic-shared block-limit))
+  (check 'cuOccupancyMaxPotentialBlockSize r)
+  (values grid block))
+
 (define (device-memset-32! dptr value count)
   (check 'cuMemsetD32 (cuMemsetD32_v2 dptr value count)))
 
@@ -331,6 +421,9 @@
   (define image
     (cond [(bytes? src) src]
           [else (call-with-input-file src (lambda (in) (port->bytes* in)))]))
+  ;; Same refusal as compile-cuda, so PTX from any source -- a file, another
+  ;; toolchain, a string -- cannot bring floating point into this process.
+  (assert-no-float-image! image)
   (define nlog 8192)
   (define img  (malloc (add1 (bytes-length image)) 'atomic-interior))
   (memcpy img image (bytes-length image))
@@ -361,6 +454,20 @@
    ;; only opts/vals are 'raw; img/infolog/errlog are 'atomic-interior and are
    ;; GC-managed, so freeing them would corrupt the heap.
    (lambda () (free opts) (free vals))))
+
+;; Duplicated deliberately rather than required from nvrtc.rkt: the driver must
+;; be able to refuse float PTX even where NVRTC is absent.
+(define ptx-float-rx
+  #px"[.](f16x2|bf16x2|f16|bf16|f32|f64|tf32)\\b|%f[0-9]|%fd[0-9]")
+
+(define (assert-no-float-image! image)
+  (define txt (bytes->string/utf-8 image #\?))
+  (define hits (regexp-match* ptx-float-rx txt))
+  (unless (null? hits)
+    (error 'load-ptx
+           "refusing floating point: this PTX contains ~a float construct~a (~a). This package is exact only."
+           (length hits) (if (= 1 (length hits)) "" "s")
+           (car hits))))
 
 (define (cstr p n)
   (define bs (make-bytes n))
