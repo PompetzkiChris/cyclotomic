@@ -136,7 +136,7 @@
    "exactness is the ground state"
    (let ([F (make-field 24)])
      (check-exn exn:fail:contract?
-                (lambda () (make-cyc F (list 0.5)))
+                (lambda () (make-cyc F (list 0.5)))  ; FLOAT-OK: the point of the test
                 "an inexact number is rejected by the contract")
      (check-true (exact? (cyc-trace (field-sqrt F 2))) "traces are exact")
      (check-true (exact? (cyc-norm (field-sqrt F 6))) "norms are exact")

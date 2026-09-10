@@ -1,5 +1,5 @@
 #lang racket/base
-(require racket/list "../cuda/driver.rkt" "../cuda/gpu.rkt" "../field.rkt")
+(require racket/list "../exact-io.rkt" "../cuda/driver.rkt" "../cuda/gpu.rkt" "../field.rkt")
 (gpu-init!)
 (define (rows F n lim)
   (for/list ([_ (in-range n)])
@@ -13,8 +13,8 @@
     (void (gpu-matmul A A #:audit? #f))
     (define (timeit mode)
       (parameterize ([current-gpu-wait mode])
-        (define t (current-inexact-milliseconds))
+        (define t (now-ms))
         (for ([_ (in-range 3)]) (void (gpu-matmul A A #:audit? #f)))
-        (/ (- (current-inexact-milliseconds) t) 3)))
+        (/ (- (now-ms) t) 3)))
     (printf "Q(z~a) ~a ~a ~a\n" nn n (round (timeit 'poll)) (round (timeit 'block)))))
 (gpu-shutdown!)

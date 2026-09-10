@@ -6,6 +6,7 @@
 ;;   4. GC moving a byte string while the driver is reading it
 
 (require racket/list
+         "../exact-io.rkt"
          "../matrix.rkt"
          "../cuda/driver.rkt"
          "../cuda/gpu.rkt"
@@ -14,7 +15,7 @@
 (define F (make-field 24))
 (define d (field-degree F))
 
-(define (mb b) (/ (round (/ (* 10.0 b) (expt 2 20))) 10.0))
+(define (mb b) (bytes->mb b))
 (define (free-now) (let-values ([(f t) (cuda-mem-info)]) f))
 
 (define (rand-int-mat n lim)
@@ -37,7 +38,7 @@
     (gpu-matmul A-big A-big)))
 (define after-err (free-now))
 (printf "   25 raising products: free ~a MB -> ~a MB   leaked ~a MB\n"
-        (mb before-err) (mb after-err) (mb (- before-err after-err)))
+        (mb before-err) (mb after-err) (mb (max 0 (- before-err after-err))))
 (printf "   verdict: ~a\n\n"
         (if (< (- before-err after-err) (* 4 1024 1024)) "OK" "LEAK"))
 
@@ -50,7 +51,7 @@
 (for ([i (in-range 50)]) (void (gpu-matmul A B #:audit? #f)))
 (define after-loop (free-now))
 (printf "   50 products: free ~a MB -> ~a MB   drift ~a MB\n"
-        (mb before-loop) (mb after-loop) (mb (- before-loop after-loop)))
+        (mb before-loop) (mb after-loop) (mb (abs (- before-loop after-loop))))
 (printf "   verdict: ~a\n\n"
         (if (< (abs (- before-loop after-loop)) (* 4 1024 1024)) "OK" "LEAK"))
 
@@ -63,15 +64,15 @@
             (let loop ()
               (unless (unbox stop)
                 (set-box! ticks (add1 (unbox ticks)))
-                (sleep 0.002)
+                (sleep 1/500)
                 (loop))))))
 (define Abig (zmat-of-integers F (rand-int-mat 640 8)))
-(define t0 (current-inexact-milliseconds))
+(define t0 (now-ms))
 (void (gpu-matmul Abig Abig #:audit? #f))
-(define elapsed (- (current-inexact-milliseconds) t0))
+(define elapsed (- (now-ms) t0))
 (set-box! stop #t)
 (sync ticker)
-(define expected (max 1 (inexact->exact (round (/ elapsed 2.0)))))
+(define expected (max 1 (round (/ elapsed 2))))
 (printf "   product took ~a ms; ticker ran ~a times (roughly ~a if never blocked)\n"
         (round elapsed) (unbox ticks) expected)
 (printf "   verdict: ~a\n\n"

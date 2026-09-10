@@ -72,7 +72,7 @@
           [v (unbiasedness (cdr (first ms)) (cdr (third ms)))])
      (check-true (exact? v) "the overlap is an exact number")
      (check-equal? v 1/6 "and it equals 1/6")
-     (check-false (= v (exact->inexact 1/6))
+     (check-false (= v (exact->inexact 1/6))  ; FLOAT-OK: the point of the test
                   "1/6 is NOT equal to the nearest double to 1/6"))))
 
 (module+ test

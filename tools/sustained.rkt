@@ -6,6 +6,7 @@
 ;; against the round-tripping path at a small size first.
 
 (require racket/list
+         "../exact-io.rkt"
          "../field.rkt"
          "../matrix.rkt"
          "../cuda/driver.rkt"
@@ -37,7 +38,7 @@
 (printf "n = ~a over Q(zeta_24), ~a chained products, ~a launches each\n"
         n reps (add1 (* deg deg)))
 (printf "one matrix = ~a MB on device\n"
-        (round (/ (* deg n n 8) 1048576.0)))
+        (bytes->mb (* deg n n 8)))
 
 ;; small entries so 24 chained products stay inside the int64 bound
 (define Z (zmat-build F n n (lambda (i j t) (if (= t 0) (if (= i j) 1 0) 0))))
@@ -45,7 +46,7 @@
                                (if (and (= t 1) (= j (modulo (+ i 1) n))) 1 0))))
 
 (gpu-reset-stats!)
-(define t0 (current-inexact-milliseconds))
+(define t0 (now-ms))
 (call-with-dmat Zp
   (lambda (D)
     (let loop ([acc (zmat->dmat Z)] [k 0])
@@ -60,17 +61,16 @@
          (define nxt (dmat* acc D #:audit? #f))
          (dmat-free! acc)
          (loop nxt (add1 k))]))))
-(define wall (- (current-inexact-milliseconds) t0))
+(define wall (- (now-ms) t0))
 
 (printf "\n  wall ~a ms\n" (round wall))
 (gpu-stats-report)
 (define s (gpu-stats))
 (printf "  device share of wall : ~a%\n"
-        (round (* 100 (/ (hash-ref s 'device-ms) wall))))
+        (if (zero? wall) 0 (round (* 100 (/ (hash-ref s 'device-ms) wall)))))
 (printf "  sustained rate       : ~a Giga-integer-ops/s\n"
-        (round (/ (* reps deg deg 2.0 (expt n 3)) (/ wall 1000.0) 1e9)))
+        (if (zero? wall) "inf" (dec (/ (* reps deg deg 2 (expt n 3)) (/ wall 1000) 1000000000) 0)))
 (let-values ([(f t) (cuda-mem-info)])
   (printf "  VRAM free after      : ~a GB of ~a GB\n"
-          (/ (round (/ (* 10.0 f) (expt 2 30))) 10.0)
-          (/ (round (/ (* 10.0 t) (expt 2 30))) 10.0)))
+          (bytes->gb f) (bytes->gb t)))
 (gpu-shutdown!)

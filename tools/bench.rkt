@@ -2,6 +2,7 @@
 ;; Exact Z[zeta_n] products from Racket, on the GPU, timed against pure Racket.
 
 (require racket/list
+         "../exact-io.rkt"
          "../field.rkt"
          "../matrix.rkt"
          "../cuda/driver.rkt"
@@ -13,7 +14,7 @@
       (make-cyc f (for/list ([_ (in-range (field-degree f))])
                     (- (random (* 2 lim)) lim))))))
 
-(define (gb b) (/ (round (/ (* 10.0 b) (expt 2 30))) 10.0))
+(define (gb b) (bytes->gb b))
 
 (gpu-init!)
 (printf "device: ~a\n" (cuda-device-name 0))
@@ -27,11 +28,11 @@
   (define sz 96)
   (define A (rand-rows f sz sz 40))
   (define B (rand-rows f sz sz 40))
-  (define t0 (current-inexact-milliseconds))
+  (define t0 (now-ms))
   (define cpu (mat* (mat f A) (mat f B)))
-  (define t1 (current-inexact-milliseconds))
+  (define t1 (now-ms))
   (define g (zmat->matrix (gpu-matmul (zmat-of-integers f A) (zmat-of-integers f B))))
-  (define t2 (current-inexact-milliseconds))
+  (define t2 (now-ms))
   (printf "  Q(zeta_~a) ~ax~a : racket ~a ms   gpu ~a ms   ~a\n"
           n sz sz
           (round (- t1 t0)) (round (- t2 t1))
@@ -49,14 +50,14 @@
     (define B (zmat-of-integers f (rand-rows f sz sz lim)))
     ;; warm up so the first launch's overhead is not counted
     (void (gpu-matmul A B #:audit? #f))
-    (define t0 (current-inexact-milliseconds))
+    (define t0 (now-ms))
     (define C (gpu-matmul A B))
-    (define t1 (current-inexact-milliseconds))
-    (define secs (/ (- t1 t0) 1000.0))
-    (define ops (* d d 2.0 (expt sz 3)))
+    (define t1 (now-ms))
+    (define secs (/ (- t1 t0) 1000))
+    (define ops (* d d 2 (expt sz 3)))
     (printf "  Q(zeta_~a) ~ax~a : ~a ms   ~a Giga-integer-ops/s   ~a launches\n"
             n sz sz (round (- t1 t0))
-            (round (/ ops secs 1e9))
+            (if (zero? secs) "inf" (dec (/ ops secs 1000000000) 0))
             (* d d))))
 
 (gpu-shutdown!)

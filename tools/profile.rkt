@@ -1,6 +1,7 @@
 #lang racket/base
 ;; Where does the wall time go, before and after the bulk path?
 (require racket/list
+         "../exact-io.rkt"
          "../field.rkt"
          "../matrix.rkt"
          "../cuda/driver.rkt"
@@ -11,8 +12,8 @@
 (define deg (field-degree F))
 
 (define-syntax-rule (ms expr)
-  (let* ([t (current-inexact-milliseconds)] [v expr])
-    (values v (- (current-inexact-milliseconds) t))))
+  (let* ([t (now-ms)] [v expr])
+    (values v (- (now-ms) t))))
 
 (printf "\n--- via cyc structs (zmat-of-integers / zmat->matrix) ---\n")
 (printf "~a\t~a\t~a\t~a\t~a\t~a\n" "n" "gen" "toplanes" "gpu" "back" "gpu_share")
@@ -26,7 +27,7 @@
   (define-values (M tback) (ms (zmat->matrix C)))
   (define total (+ tgen tconv tgpu tback))
   (printf "~a\t~a\t~a\t~a\t~a\t~a%\n" n (round tgen) (round tconv) (round tgpu)
-          (round tback) (round (* 100 (/ tgpu total)))))
+          (round tback) (if (zero? total) 0 (round (* 100 (/ tgpu total))))))
 
 (printf "\n--- via the bulk path (zmat-build / zmat-coeff) ---\n")
 (printf "~a\t~a\t~a\t~a\t~a\n" "n" "build" "gpu" "readback" "gpu_share")
@@ -39,7 +40,7 @@
           (+ s (zmat-coeff C i j 0)))))
   (define total (+ tbuild tgpu tback))
   (printf "~a\t~a\t~a\t~a\t~a%\n" n (round tbuild) (round tgpu) (round tback)
-          (round (* 100 (/ tgpu total)))))
+          (if (zero? total) 0 (round (* 100 (/ tgpu total))))))
 
 (printf "\n--- the two paths agree ---\n")
 (let* ([n 32]

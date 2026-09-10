@@ -2,6 +2,7 @@
 ;; The hardening has to be tested, not asserted.
 
 (require rackunit
+         "../exact-io.rkt"
          rackunit/text-ui
          racket/list
          "../field.rkt"
@@ -78,11 +79,11 @@
                                   (set-box! ticks (add1 (unbox ticks)))
                                   (sleep 0)
                                   (loop)))))])
-       (sleep 0.05)
+       (sleep 1/20)
        (let* ([t-before (unbox ticks)]
-              [t0 (current-inexact-milliseconds)]
+              [t0 (now-ms)]
               [_ (void (gpu-matmul A A #:audit? #f))]
-              [ms (- (current-inexact-milliseconds) t0)]
+              [ms (- (now-ms) t0)]
               [during (- (unbox ticks) t-before)])
          (set-box! stop #t)
          (sync ticker)

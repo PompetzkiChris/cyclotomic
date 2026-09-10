@@ -15,6 +15,7 @@
 
 (require racket/vector
          racket/runtime-path
+         "../exact-io.rkt"
          "driver.rkt"
          "../field.rkt"
          "../matrix.rkt")
@@ -50,13 +51,13 @@
 (define stat-launches 0)
 (define stat-up-bytes 0)
 (define stat-down-bytes 0)
-(define stat-device-ms 0.0)
+(define stat-device-ms 0)
 (define stat-elements 0)
 
 (define (gpu-reset-stats!)
   (set! stat-matmuls 0) (set! stat-launches 0)
   (set! stat-up-bytes 0) (set! stat-down-bytes 0)
-  (set! stat-device-ms 0.0) (set! stat-elements 0)
+  (set! stat-device-ms 0) (set! stat-elements 0)
   (void))
 
 (define (gpu-stats)
@@ -73,8 +74,8 @@
            (hash-ref s 'matmuls) (hash-ref s 'launches)
            (round (hash-ref s 'device-ms)))
   (fprintf port "           ~a MB up, ~a MB down, ~a output field elements\n"
-           (round (/ (hash-ref s 'uploaded-bytes) 1048576.0))
-           (round (/ (hash-ref s 'downloaded-bytes) 1048576.0))
+           (bytes->mb (hash-ref s 'uploaded-bytes))
+           (bytes->mb (hash-ref s 'downloaded-bytes))
            (hash-ref s 'output-elements)))
 
 (define int64-max (sub1 (expt 2 63)))
@@ -273,7 +274,7 @@
 
   ;; Every device buffer is released on the way out, including when the bound
   ;; check raises, a launch fails, or the caller escapes with a continuation.
-  (define t-start (current-inexact-milliseconds))
+  (define t-start (now-ms))
   (call-with-device-buffers
    (list (bytes-length (zmat-planes A))
          (bytes-length (zmat-planes B))
@@ -312,7 +313,7 @@
      (set! stat-launches (+ stat-launches launches))
      (set! stat-elements (+ stat-elements (* n c)))
      (set! stat-device-ms (+ stat-device-ms
-                             (- (current-inexact-milliseconds) t-start)))
+                             (- (now-ms) t-start)))
      (zmat f n c out))))
 
 ;; ---------------------------------------------------------------------------
@@ -366,7 +367,7 @@
   (define-values (dR maxR nrows) (device-reduction-table f))
   (define stride (* n c))
   (define nC (* d stride))
-  (define t-start (current-inexact-milliseconds))
+  (define t-start (now-ms))
 
   (define dA (dmat-ptr A))
   (define dB (dmat-ptr B))
@@ -389,7 +390,7 @@
     (set! stat-matmuls (add1 stat-matmuls))
     (set! stat-launches (+ stat-launches launches))
     (set! stat-elements (+ stat-elements (* n c)))
-    (set! stat-device-ms (+ stat-device-ms (- (current-inexact-milliseconds) t-start)))
+    (set! stat-device-ms (+ stat-device-ms (- (now-ms) t-start)))
     (dmat f n c dC)))
 
 ;; Issue the kernels for one product; returns the number of launches made.

@@ -10,6 +10,7 @@
 ;;           already known from the bound check.
 
 (require racket/list
+         "../exact-io.rkt"
          "../field.rkt"
          "../matrix.rkt"
          "../cuda/driver.rkt"
@@ -49,9 +50,9 @@
   (define (timeit mode)
     (parameterize ([current-gpu-kernel mode])
       (void (gpu-matmul A A #:audit? #f))
-      (define t (current-inexact-milliseconds))
+      (define t (now-ms))
       (for ([_ (in-range 3)]) (void (gpu-matmul A A #:audit? #f)))
-      (/ (- (current-inexact-milliseconds) t) 3)))
+      (/ (- (now-ms) t) 3)))
   (define ts (for/list ([m (in-list MODES)]) (timeit m)))
   (define bi (argmin (lambda (i) (list-ref ts i)) '(0 1 2 3)))
   (printf "Q(z~a) ~a  ~a  ~a  ~a  ~a   ~a ~ax\n"
@@ -62,7 +63,7 @@
           (pad (round (third ts)) 6)
           (pad (round (fourth ts)) 6)
           (list-ref MODES bi)
-          (/ (round (* 10 (/ (first ts) (list-ref ts bi)))) 10.0)))
+          (ratio (first ts) (list-ref ts bi))))
 
 (gpu-shutdown!)
 (when (> fails 0) (exit 1))

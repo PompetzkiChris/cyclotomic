@@ -255,7 +255,7 @@
           ;; comes back, so other threads run without adding latency here. Only
           ;; a genuinely long wait escalates to a real sleep, which stops this
           ;; from spinning a core for seconds on a big kernel.
-          (if (< spins 200000) (sleep 0) (sleep 0.0005))
+          (if (< spins 200000) (sleep 0) (sleep 1/2000))
           (loop (add1 spins))]
          [else (check 'cuEventQuery q)]))))
 
