@@ -1,0 +1,7 @@
+compiled/
+**/compiled/
+*.exe
+*.exp
+*.lib
+*.obj
+*.zmat
