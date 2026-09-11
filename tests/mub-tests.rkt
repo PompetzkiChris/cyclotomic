@@ -79,4 +79,25 @@
   (void
    (run-tests
     (test-suite "mub"
-                matrix-tests d2-tests d3-tests d6-tests exactness-tests))))
+                d4-tests d12-tests matrix-tests d2-tests d3-tests d6-tests exactness-tests))))
+
+(define d4-tests
+  (test-suite
+   "dimension 4: complete set of 5 via Galois ring GR(4,2)"
+   (let ([d4 (mubs-d4 (make-field 24))])
+     (check-equal? (length d4) 5 "five bases (computational + four)")
+     (for ([p (in-list d4)]) (check-true (mat-unitary? (cdr p)) (format "~a unitary" (car p))))
+     (check-true (mutually-unbiased? (map cdr d4) 4) "all pairwise |<.,.>|^2 = 1/4")
+     (check-true (mutually-unbiased? (map cdr (mubs-d4 (make-field 8))) 4) "same over Q(zeta_8)")
+     (check-exn exn:fail? (lambda () (mubs-d4 (make-field 3))) "refuses a field without i"))))
+
+(define d12-tests
+  (test-suite
+   "dimension 12: four MUBs via 4 (x) 3"
+   (let ([d12 (mubs-d12)])
+     (check-equal? (length d12) 4 "four bases")
+     (for ([p (in-list d12)]) (check-true (mat-unitary? (cdr p)) (format "~a unitary" (car p))))
+     (for* ([i (in-range 4)] [j (in-range (add1 i) 4)])
+       (check-equal? (unbiasedness (cdr (list-ref d12 i)) (cdr (list-ref d12 j))) 1/12
+                     (format "|<~a,~a>|^2 = 1/12" i j)))
+     (check-true (mutually-unbiased? (map cdr d12) 12) "mutually unbiased in d=12"))))

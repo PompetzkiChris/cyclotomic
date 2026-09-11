@@ -198,15 +198,28 @@ yes or no rather than a threshold.
 @deftogether[(
   @defproc[(mubs-d2 [f cyclofield?]) list?]
   @defproc[(mubs-d3 [f cyclofield?]) list?]
+  @defproc[(mubs-d4 [f cyclofield?]) list?]
   @defproc[(mubs-d6) list?]
+  @defproc[(mubs-d12) list?]
 )]{
-  Complete sets in dimensions 2 and 3, and three pairwise unbiased bases in
-  dimension 6 built by tensoring them in @tt{Q(zeta_24)} --- the smallest
-  cyclotomic field holding @tt{sqrt2}, @tt{sqrt3}, @tt{sqrt6} and @tt{i} at
-  once.
+  Complete sets in dimensions 2, 3 and 4, three pairwise unbiased bases in
+  dimension 6, and four in dimension 12.
 
-  Three in dimension 6 is the standard lower bound. Whether a fourth exists is a
-  long-standing open problem, and nothing here bears on it.
+  @racket[mubs-d4] gives the complete set of 5 --- 4 is a prime power, so it
+  exists --- from the Galois ring @tt{GR(4,2) = Z4[xi]}, whose Teichmuller set
+  has 4 elements and whose trace to @tt{Z4} is @tt{tr(a + b xi) = 2a + 3b}.
+  Squaring is not the Frobenius in characteristic 4, so that trace is not
+  @tt{z + z^2}. It needs only @tt{i} and the rational @tt{1/2}, so any field
+  with @tt{4 | n} works.
+
+  @racket[mubs-d12] tensors the 5-set of dimension 4 with the 4-set of
+  dimension 3 index-wise, giving @tt{min(5,4) = 4} mutually unbiased bases in
+  dimension 12 --- more than the 3 that @tt{2 (x) 2 (x) 3} would give. Both live
+  in @tt{Q(zeta_24)}, degree 8, so a product runs on the Karatsuba kernel.
+
+  Three in dimension 6, four in dimension 12: these are the standard tensor
+  lower bounds. Whether either can be exceeded is a long-standing open problem,
+  and nothing here bears on it.
 }
 
 @section{The CUDA driver}
