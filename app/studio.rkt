@@ -21,7 +21,7 @@
 
 (define disk-file "C:\\ClaudeOutput\\math-results\\executioner_stream.bin")
 (define log-file  "C:\\ClaudeOutput\\math-results\\executioner_kills.log")
-(define hog-bytes (* 8192 8192 8 8))   ; one resident 8192^2 x 8-plane matrix = 4 GiB
+(define hog-bytes (* 4096 4096 8 8))   ; one resident 4096^2 x 8-plane matrix = 1 GiB
 
 (define (build-mubs d) (mubs-optimal d))
 (define (pp-str fs)
@@ -43,7 +43,7 @@
 (define (auto-nhog)
   (with-handlers ([(lambda (_) #t) (lambda (e) 3)])
     (define-values (free total) (cuda-mem-info))
-    (max 1 (- (quotient free hog-bytes) 2))))
+    (max 1 (min 20 (- (quotient free hog-bytes) 2)))))
 
 ;; ---- palette --------------------------------------------------------------
 (define col-bg (make-object color% 18 19 24))
@@ -69,14 +69,17 @@
 (define exec-frame%
   (class frame%
     (super-new)
-    (define/override (on-activate active?)
-      (when running (set-paused! (not active?))))))
+    (define/override (on-subwindow-char r e)
+      (define k (send e get-key-code))
+      (cond [(and running (memv k (list #\p #\P #\space)))
+             (set-paused! (not paused)) #t]
+            [else (super on-subwindow-char r e)]))))
 (define frame (new exec-frame% [label "MUB EXECUTIONER -- RTX 5090 + 9950X3D"] [width 1080] [height 840]))
 (define root (new vertical-panel% [parent frame] [spacing 4] [border 10] [alignment '(left top)]))
 (new message% [parent root] [font f-lbl]
      [label "MUB EXECUTIONER    name the families, kill every pair, pin the machine to the wall    (exact, no float)"])
 (new message% [parent root] [font f-lbl] [auto-resize #t]
-     [label "TO PAUSE:  press  Ctrl + Alt + Delete  (or click away).  It idles, then RESUMES when you return."])
+     [label "TO PAUSE: press  P  (toggles).   TO STOP: Task Manager -> End task (kills the app and every core-burner)."])
 
 (define ctl (new horizontal-panel% [parent root] [stretchable-height #f] [spacing 10] [alignment '(left center)]))
 (new message% [parent ctl] [label "Dimension:"])
@@ -86,7 +89,7 @@
        [callback (lambda (b e)
                    (unless running
                      (send exec-btn enable #f)
-                     (send exec-btn set-label "RUNNING -- Ctrl+Alt+Del to pause")
+                     (send exec-btn set-label "RUNNING -- press P to pause")
                      (start-execute (string->number (send dim-choice get-string-selection)))))]))
 
 (define fam (new text-field% [parent root] [label ""] [style '(multiple)] [min-height 78] [enabled #f]))
@@ -154,12 +157,12 @@
          (apply string-append (map (lambda (s) (string-append s "\n")) (families-of d)))
          (format "\ntensor bases:  ~a\n" (map car (build-mubs d)))
          (format "targets: ~a pairs, each |<Bi,Bj>|^2 must be exactly 1/~a\n" (length targets) d)
-         (format "auto-optimized: ~a resident 8192^2 matrices in VRAM (~~~a GB), ~a CPU cores burning\n"
+         (format "auto-optimized: ~a resident 4096^2 matrices in VRAM (~~~a GB), ~a CPU cores burning\n"
                  nhog (quotient (* nhog hog-bytes) 1073741824) (processor-count))))
   (send kill-canvas refresh)
   (thread (lambda ()
     (define F (make-field 24))
-    (define blaze (zmat-build F 8192 8192 (lambda (i j t) (- (random 64) 32))))
+    (define blaze (zmat-build F 4096 4096 (lambda (i j t) (- (random 64) 32))))
     (define bd (zmat->dmat blaze))
     (set! hogs (cons bd (filter values
                                 (for/list ([_ (in-range (sub1 nhog))])
@@ -174,7 +177,7 @@
             [else
              (with-handlers ([(lambda (_) #t) (lambda (e) (void))])
                (dmat-free! (dmat* bd bd #:audit? #f)))
-             (when (and running (not paused) (zero? (modulo i 3)))
+             (when (and running (not paused) (zero? (modulo i 20)))
                (with-handlers ([(lambda (_) #t) (lambda (e) (void))])
                  (define bs (zmat-planes (dmat->zmat bd)))
                  (call-with-output-file disk-file #:exists 'replace (lambda (o) (write-bytes bs o)))
