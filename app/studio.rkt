@@ -168,7 +168,11 @@
                                 (for/list ([_ (in-range (sub1 nhog))])
                                   (with-handlers ([(lambda (_) #t) (lambda (e) #f)]) (zmat->dmat blaze))))))
     (set! burners (for/list ([_ (in-range (processor-count))]) (spawn-burner)))
-    ;; GPU + disk, serial on the one CUDA context
+    ;; GPU + disk, serial on the one CUDA context. The snapshot copies the
+    ;; device result into ONE preallocated host buffer -- not a fresh 1 GB
+    ;; byte string each time -- so committed memory stays flat, and a periodic
+    ;; major GC reclaims the per-pass matrices the march builds.
+    (define snap-buf (make-bytes (* (zmat-rows blaze) (zmat-cols blaze) (field-degree F) 8)))
     (thread (lambda ()
       (let loop ([i 0])
         (when running
@@ -179,9 +183,10 @@
                (dmat-free! (dmat* bd bd #:audit? #f)))
              (when (and running (not paused) (zero? (modulo i 20)))
                (with-handlers ([(lambda (_) #t) (lambda (e) (void))])
-                 (define bs (zmat-planes (dmat->zmat bd)))
-                 (call-with-output-file disk-file #:exists 'replace (lambda (o) (write-bytes bs o)))
-                 (set! bytes-written (+ bytes-written (bytes-length bs)))))
+                 (copy-from-device! snap-buf (dmat-ptr bd))     ; reuse one buffer
+                 (call-with-output-file disk-file #:exists 'replace (lambda (o) (write-bytes snap-buf o)))
+                 (set! bytes-written (+ bytes-written (bytes-length snap-buf))))
+               (collect-garbage 'incremental))
              (loop (add1 i))])))))
     ;; MARCH through the dimensions in order, killing every pair of each family,
     ;; then advancing. Loops the whole march while the machine stays pinned.
