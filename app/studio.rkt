@@ -193,28 +193,36 @@
                  (set! bytes-written (+ bytes-written (bytes-length snap-buf))))
                (collect-garbage 'incremental))
              (loop (add1 i))])))))
-    ;; MARCH through the dimensions in order, killing every pair of each family,
-    ;; then advancing. Loops the whole march while the machine stays pinned.
-    (let big ()
+    ;; MARCH UPWARD, unbounded: d, d+1, d+2, ...  computing the OPTIMAL known MUB
+    ;; set for each dimension and killing every pair. No loop back, no stop at 16
+    ;; -- it climbs forever until you pause (P) or End-task it.
+    (let mdim ([dd d])
       (when running
-        (for ([dd (in-list march)] #:break (not running))
-          (define tg (targets-for dd))
+        (with-handlers
+          ([(lambda (_) #t)
+            (lambda (e)
+              (queue-callback (lambda ()
+                (send eta set-label (format "d=~a: construction unavailable, skipped   ·   ~a exact so far" dd kills-done)))))])
+          (define set (build-mubs dd))                 ; mubs-optimal dd, built once
+          (define names (map car set))
+          (define mats  (map cdr set))
+          (define nb (length set))
+          (define tg (for*/list ([i (in-range nb)] [j (in-range (add1 i) nb)])
+                       (vector (format "~a  x  ~a" (list-ref names i) (list-ref names j)) i j 'pending #f)))
           (queue-callback (lambda ()
             (set! d-now dd) (set! targets tg)
             (send fam set-value
                   (string-append
                    (apply string-append (map (lambda (s) (string-append s "\n")) (families-of dd)))
-                   (format "\ntensor bases:  ~a\n" (map car (build-mubs dd)))
-                   (format "targets: ~a pairs, each |<Bi,Bj>|^2 must be exactly 1/~a\n" (length tg) dd)))
+                   (format "\ntargets: ~a pairs, each |<Bi,Bj>|^2 must be exactly 1/~a\n" (length tg) dd)))
             (send kill-canvas refresh)))
-          (define ms (parameterize ([current-mat*-hook #f]) (map cdr (build-mubs dd))))
           (for ([t (in-list tg)] [k (in-naturals)] #:break (not running))
             (wait-while-paused)
             (when running
               (queue-callback (lambda () (vector-set! t 3 'live) (send kill-canvas refresh)))
               (define kt0 (now-ms))
               (define v (parameterize ([current-mat*-hook #f])
-                          (unbiasedness (list-ref ms (vector-ref t 1)) (list-ref ms (vector-ref t 2)))))
+                          (unbiasedness (list-ref mats (vector-ref t 1)) (list-ref mats (vector-ref t 2)))))
               (sleep 0.5)
               (set! kills-done (add1 kills-done)) (set! kt-sum (+ kt-sum (- (now-ms) kt0)))
               (with-handlers ([(lambda (_) #t) void])
@@ -227,13 +235,12 @@
                 (vector-set! t 3 'killed)
                 (vector-set! t 4 (if (equal? v (/ 1 dd)) (format "1/~a" dd) (format "~a NOT 1/~a" v dd)))
                 (send score set-label (format "~a killed" kills-done))
-                (send eta set-label (format "MARCH  d=~a:  ~a left in family   ETA ~a   ·   ~a exact total"
+                (send eta set-label (format "MARCH  d=~a:  ~a left   ETA ~a   ·   ~a exact, climbing (P=pause)"
                                             dd left (mmss (* left avg)) kills-done))
                 (send kill-canvas refresh)))))
-          ;; reclaim this family's matrices and overlap intermediates before the
-          ;; next dimension, so committed memory stays flat over a long march
+          ;; reclaim this family before the next dimension -> flat memory
           (collect-garbage))
-        (big))))))
+        (mdim (add1 dd)))))))
 
 ;; ---- meters ---------------------------------------------------------------
 (define (sh cmd) (with-handlers ([(lambda (_) #t) (lambda (e) "")])

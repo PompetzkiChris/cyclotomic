@@ -30,7 +30,11 @@
   (cond
     [(= p 2) (if (<= k 1) 8 (if (odd? k) (* 4 (expt 2 (quotient (add1 k) 2))) 4))] ; ~ needs i and maybe sqrt2
     [(= k 1) (if (= 1 (modulo p 4)) p (* 4 p))]   ; odd prime: zeta_p, and i when p=3 mod4
-    [else p]))                                     ; odd prime power via GF: zeta_p, 1/q rational
+    ;; odd prime power p^k via GF(p^k): always needs zeta_p; when k is ODD the
+    ;; normalizer 1/sqrt(p^k) carries a sqrt(p), which needs the same field the
+    ;; prime case does (zeta_p, plus i when p=3 mod4). k even -> 1/sqrt is rational.
+    [(odd? k) (if (= 1 (modulo p 4)) p (* 4 p))]
+    [else p]))
 
 ;; ---- odd prime p: Heisenberg-Weyl, complete set p+1 -----------------------
 (define (mubs-prime p f)
