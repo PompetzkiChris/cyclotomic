@@ -23,7 +23,12 @@
 (define log-file  "C:\\ClaudeOutput\\math-results\\executioner_kills.log")
 (define hog-bytes (* 4096 4096 8 8))   ; one resident 4096^2 x 8-plane matrix = 1 GiB
 
-(define (build-mubs d) (mubs-optimal d))
+;; Build each dimension's optimal MUB set ONCE and cache it. The matrices never
+;; change, so a march that loops 2->16 forever must not reconstruct the
+;; Galois-ring / finite-field sets every pass -- that was the bulk of the
+;; per-pass allocation. 15 immutable sets held is bounded and tiny.
+(define mub-cache (make-hasheqv))
+(define (build-mubs d) (hash-ref! mub-cache d (lambda () (mubs-optimal d))))
 (define (pp-str fs)
   (string-join (for/list ([f (in-list fs)])
                  (if (= 1 (cadr f)) (format "~a" (car f)) (format "~a^~a" (car f) (cadr f)))) " x "))
@@ -224,7 +229,10 @@
                 (send score set-label (format "~a killed" kills-done))
                 (send eta set-label (format "MARCH  d=~a:  ~a left in family   ETA ~a   ·   ~a exact total"
                                             dd left (mmss (* left avg)) kills-done))
-                (send kill-canvas refresh))))))
+                (send kill-canvas refresh)))))
+          ;; reclaim this family's matrices and overlap intermediates before the
+          ;; next dimension, so committed memory stays flat over a long march
+          (collect-garbage))
         (big))))))
 
 ;; ---- meters ---------------------------------------------------------------
