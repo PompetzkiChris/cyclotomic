@@ -13,7 +13,7 @@
          racket/string
          racket/contract
          racket/promise
-         (only-in math/number-theory coprime?)
+         (only-in math/number-theory coprime? totient)
          "poly.rkt")
 
 ;; racket/base has exact-integer? but not exact-rational?; this is the guard
@@ -23,6 +23,7 @@
 (provide
  exact-rational?
  (struct-out cyclofield)
+ cyclofield-phi
  cyclofield-pow
  cyclofield-units
  (contract-out
@@ -73,12 +74,18 @@
 ;; caller that only asked for the degree. Behind a promise they are computed at
 ;; most once, on first use, and every later access is a field read. delay on,
 ;; delay off.
-(struct cyclofield (n deg phi pow-p units-p)
+;; Phi_n itself is one of them. It is needed to reduce, and for nothing else:
+;; the degree is phi(n), which Euler's totient gives from the factorisation of
+;; n without dividing any polynomials. At n = 2520 computing Phi_n costs 50 ms
+;; and the power table built from it costs 46, so a caller who asked only for
+;; the degree was paying the larger of the two.
+(struct cyclofield (n deg phi-p pow-p units-p)
   #:transparent
   #:methods gen:custom-write
   [(define (write-proc f port mode)
      (fprintf port "#<Q(zeta_~a) degree ~a>" (cyclofield-n f) (cyclofield-deg f)))])
 
+(define (cyclofield-phi f) (force (cyclofield-phi-p f)))
 (define (cyclofield-pow f) (force (cyclofield-pow-p f)))
 (define (cyclofield-units f) (force (cyclofield-units-p f)))
 
@@ -109,12 +116,17 @@
   (hash-ref!
    field-cache n
    (lambda ()
-     (define phi (cyclotomic-poly n))
-     (define deg (sub1 (vector-length phi)))
-     (unless (= 1 (vector-ref phi deg))
-       (error 'make-field "Phi_~a is not monic" n))
-     (cyclofield n deg phi
-                 (delay (build-power-table n phi deg))
+     (define deg (totient n))
+     (define phi-p
+       (delay (let ([phi (cyclotomic-poly n)])
+                (unless (= (sub1 (vector-length phi)) deg)
+                  (error 'make-field "deg Phi_~a is ~a, but phi(~a) = ~a"
+                         n (sub1 (vector-length phi)) n deg))
+                (unless (= 1 (vector-ref phi deg))
+                  (error 'make-field "Phi_~a is not monic" n))
+                phi)))
+     (cyclofield n deg phi-p
+                 (delay (build-power-table n (force phi-p) deg))
                  (delay (for/list ([k (in-range 1 (add1 n))] #:when (coprime? k n)) k))))))
 
 (define (field-degree f) (cyclofield-deg f))

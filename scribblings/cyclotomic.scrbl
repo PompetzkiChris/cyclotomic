@@ -25,9 +25,13 @@ the power basis @tt{1, zeta, ..., zeta^(phi(n)-1)}.
   The field @tt{Q(zeta_n)}. Fields are cached by @racket[n], so repeated calls
   return the same object.
 
-  The power table and the unit group are @emph{promises}: a caller who only
-  wants @racket[field-degree] does not pay to build them. At @tt{n = 5040} the
-  power table costs about 121 ms, and it is built at most once, on first use.
+  @tt{Phi_n}, the power table and the unit group are all @emph{promises}: a
+  caller who only wants @racket[field-degree] builds none of them, because the
+  degree is @tt{phi(n)} and Euler's totient gives that from the factorisation of
+  @racket[n] without dividing any polynomials. Each is built at most once, on
+  first use. @racket[promise-forced?] on @racket[cyclofield-phi-p] is
+  @racket[#f] on a field that has only been asked for its degree, which is how
+  @tt{tests/purity-tests.rkt} checks it.
 }
 
 @defproc[(field-degree [f cyclofield?]) exact-positive-integer?]{
@@ -88,6 +92,68 @@ the power basis @tt{1, zeta, ..., zeta^(phi(n)-1)}.
 @defproc[(cyc-lift [a cyc?] [g cyclofield?]) cyc?]{
   Embed into @tt{Q(zeta_m)} via @tt{zeta_n = zeta_m^(m/n)}. Raises when
   @tt{n} does not divide @tt{m}.
+}
+
+@section{Karatsuba for the cyclotomic convolution}
+
+@defmodule[cyclotomic/karatsuba]
+
+A product in @tt{Z[zeta_n]} is the convolution of two length-@tt{deg}
+coefficient vectors followed by reduction mod @tt{Phi_n}. Done directly that is
+@tt{deg^2} coefficient multiplications, and on the GPU each one is a full matrix
+product --- 64 of them for @tt{Q(zeta_24)}. Karatsuba does a length-@tt{2H}
+convolution with three length-@tt{H} ones, so @tt{deg = 2^L} costs @tt{3^L}
+multiplications: 27 instead of 64 at degree 8.
+
+This is not an approximation of the product. Every coefficient of the result is
+the same integer it would have been; only the intermediate sums differ, and they
+are integers too. There is nothing to round.
+
+@defproc[(kara-levels [deg exact-positive-integer?])
+         (or/c exact-nonnegative-integer? #f)]{
+  How many halvings @racket[deg] admits: @tt{L} when @tt{deg = 2^L}, and
+  @racket[#f] otherwise. Only powers of two have a kernel; every other degree
+  uses the direct product, which is correct for any degree.
+}
+
+@deftogether[(
+  @defproc[(kara-products [l exact-nonnegative-integer?]) exact-positive-integer?]
+  @defproc[(kara-mac [a vector?] [b vector?]
+                     [zero any/c 0] [add procedure? +] [mul procedure? *]) vector?]
+  @defproc[(kara-fold [P vector?] [l exact-nonnegative-integer?]
+                      [zero any/c 0] [add procedure? +] [sub procedure? -]) vector?]
+)]{
+  @racket[kara-mac] forms the @tt{3^L} products in the order the kernel forms
+  them; @racket[kara-fold] recombines them into the raw convolution. The
+  operations are arguments so the same code can run on integers to compute and
+  on basis vectors to derive a matrix.
+}
+
+@deftogether[(
+  @defproc[(kara-fold-matrix [l exact-nonnegative-integer?]) vector?]
+  @defproc[(kara-output-matrix [f cyclofield?]) (values vector? exact-nonnegative-integer?)]
+)]{
+  The recombination is linear, so it collapses into an integer matrix ---
+  together with the @tt{Phi_n} reduction. @racket[kara-output-matrix] returns the
+  @tt{deg x 3^L} matrix @tt{K} with @tt{out_t = sum_j K[t][j] P_j}, and the exact
+  maximum row sum of @tt{|K|}, which is what the overflow certificate needs: 18
+  for @tt{Q(zeta_24)}, computed rather than estimated.
+
+  This is the whole reason the device unwinds no recursion of its own. The
+  algebra lives here, in Racket, where it is checked against @racket[cyc*] --- the
+  ordinary field multiplication the rest of the package uses.
+}
+
+@deftogether[(
+  @defproc[(kara-operand-growth [l exact-nonnegative-integer?]) exact-positive-integer?]
+  @defproc[(kara-growth [l exact-nonnegative-integer?]) exact-positive-integer?]
+)]{
+  The price, stated rather than discovered. Each multiplicand is a sum of up to
+  @tt{2^L} original coefficients, so the host must see @tt{2^L max|A|} and
+  @tt{2^L max|B|} inside @tt{int32}; and each accumulator carries the @tt{4^L}
+  that comes with them. When the resulting bound does not fit @tt{int64}, the
+  kernel selector chooses a kernel with a smaller bound and a larger
+  multiplication count. Nothing is truncated to make it fit.
 }
 
 @section{Matrices}
@@ -273,5 +339,11 @@ its own power table, a deliberately different kernel, and a CPU oracle
 accumulating in 128 bits so a product that silently wrapped @tt{int64} is
 detected rather than matched.
 
-All four GPU kernels agree with it, coefficient for coefficient, across
-@tt{Q(zeta_6)}, @tt{Q(zeta_8)}, @tt{Q(zeta_12)} and @tt{Q(zeta_24)}.
+All six GPU kernels agree with it, coefficient for coefficient, across
+@tt{Q(zeta_6)}, @tt{Q(zeta_8)}, @tt{Q(zeta_12)} and @tt{Q(zeta_24)} --- a fast
+path checked only against itself is not checked.
+
+The Karatsuba kernel is checked three ways, because the danger with a faster
+multiplication is that it is faster and wrong on some inputs: the algebra against
+direct convolution, the matrix the kernel is handed against @racket[cyc*], and
+the kernel itself against the kernels that do @tt{4^L} multiplications.

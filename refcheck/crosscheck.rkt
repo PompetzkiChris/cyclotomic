@@ -40,7 +40,7 @@
       (define rows (third hdr))
       (define cols (fourth hdr))
       (define planes (read-bytes (* (second hdr) rows cols 8) in))
-      (zmat F rows cols planes))))
+      (make-zmat F rows cols planes))))
 
 (define (run . args)
   (define out (open-output-string))
@@ -78,7 +78,7 @@
   ;; every kernel mode must match the independent reference. A fast path that
   ;; is only ever checked against itself is not checked.
   (define per-mode
-    (for/list ([m (in-list '(split fused rb w32))])
+    (for/list ([m (in-list '(split fused rb w32 ultra kara))])
       (define ours (parameterize ([current-gpu-kernel m]) (gpu-matmul A B)))
       (cons m (and theirs (equal? (zmat-planes ours) (zmat-planes theirs))))))
   (define match? (for/and ([q (in-list per-mode)]) (cdr q)))
@@ -86,7 +86,7 @@
   (printf "Q(z~a)	~ax~a	~a	~a	~a
 " ncyc sz sz bits
           (if ok "ok" "FAILED")
-          (cond [match? "ALL 4 KERNELS IDENTICAL"]
+          (cond [match? "ALL 6 KERNELS IDENTICAL"]
                 [(not theirs) "-"]
                 [else (format "DIFFER ~a"
                               (for/list ([q (in-list per-mode)] #:unless (cdr q))

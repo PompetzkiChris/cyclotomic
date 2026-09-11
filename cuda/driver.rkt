@@ -30,7 +30,9 @@
          launch! synchronize! synchronize-blocking! current-gpu-wait
          ;; streams, pinned host memory, async transfers
          make-stream stream? stream-destroy! stream-synchronize!
-         pinned-alloc pinned-free! pinned-ptr pinned-bytes pinned?
+         pinned-alloc pinned-free! pinned-ptr pinned-bytes pinned? pinned-size
+         pinned-fill! pinned-read!
+         copy-to-device/pinned! copy-from-device/pinned!
          call-with-pinned
          copy-to-device/async! copy-from-device/async!
          ;; launch configuration from the device, not from a guess
@@ -381,9 +383,38 @@
   (memcpy bs (pinned-ptr h) k)
   bs)
 
+;; Copy a byte string into pinned memory, and back out into one that already
+;; exists. The driver moves pinned memory across PCIe by DMA without staging it
+;; itself, which on this machine is about 2.5x the rate of an unpinned copy;
+;; these two are what let a caller pay for the pin once and reuse it.
+(define (pinned-fill! h bs [n #f])
+  (define k (or n (bytes-length bs)))
+  (unless (<= k (pinned-size h))
+    (error 'pinned-fill! "~a bytes into a ~a byte pinned buffer" k (pinned-size h)))
+  (memcpy (pinned-ptr h) bs k)
+  (void))
+
+(define (pinned-read! bs h [n #f])
+  (define k (or n (bytes-length bs)))
+  (unless (<= k (pinned-size h))
+    (error 'pinned-read! "~a bytes out of a ~a byte pinned buffer" k (pinned-size h)))
+  (memcpy bs (pinned-ptr h) k)
+  (void))
+
 (define (call-with-pinned nbytes proc)
   (define h (pinned-alloc nbytes))
   (dynamic-wind void (lambda () (proc h)) (lambda () (pinned-free! h))))
+
+;; Synchronous copies that start from, or land in, pinned memory. Same calls as
+;; copy-to-device! / copy-from-device!, minus the staging through immobile
+;; memory, because pinned memory is already immobile.
+(define (copy-to-device/pinned! dptr h [nbytes #f])
+  (define n (or nbytes (pinned-size h)))
+  (check 'cuMemcpyHtoD (cuMemcpyHtoD_v2 dptr (pinned-ptr h) n)))
+
+(define (copy-from-device/pinned! h dptr [nbytes #f])
+  (define n (or nbytes (pinned-size h)))
+  (check 'cuMemcpyDtoH (cuMemcpyDtoH_v2 (pinned-ptr h) dptr n)))
 
 (define (copy-to-device/async! dptr h nbytes s)
   (check 'cuMemcpyHtoDAsync

@@ -401,3 +401,302 @@ extern "C" __global__ void plane_madd_w32(
         }
     }
 }
+
+// ===========================================================================
+// ULTRA: one launch, narrow operands, wide accumulate, C written exactly once.
+//
+// Measured against the four kernels above on this device -- RTX 5090, sm_120,
+// 170 SMs, 1536 threads and 64K registers per SM, 100 KB of shared memory per
+// SM in carve-outs of {0,8,16,32,64,100} KB, 96 MiB of L2 -- every one of them
+// leaves the same three things on the table:
+//
+//   1. deg^2 launches. Q(zeta_24) pays 64 of them, and each one re-reads a
+//      whole A plane and a whole B plane out of L2.
+//   2. C is accumulated with +=, so every launch reads C back and writes it
+//      again. At n = 1024 that is more traffic than the operands.
+//   3. A 64x64 output tile gives 256 blocks at n = 1024. The device has 170
+//      SMs and room for 24 blocks on each: the grid cannot fill it.
+//
+// This kernel fixes all three at once. The field product is the convolution
+//     raw[m] = sum_{p+q=m} A_p B_q ,  out_t = sum_m R[m][t] raw[m] ,
+// and the convolution itself supplies the arithmetic intensity: one output
+// element per thread already does DEG*DEG multiply-accumulates against only
+// 2*DEG shared-memory reads, so DEG/2 MACs per read with no output blocking
+// at all. That is what makes a 16x16 tile worth using -- and a 16x16 tile at
+// n = 1024 is 4096 blocks, which does fill the device.
+//
+// The price is registers: raw[] is 2*DEG-1 accumulators of 64 bits, so 30 of
+// them at DEG = 8. That is why the tile is 16x16 and one element per thread
+// rather than 64x64 and sixteen: sixteen outputs would want 480 registers and
+// the hardware caps a thread at 255.
+//
+// DEG is a template parameter, not an argument. phi(n) is known on the host,
+// and compiling one kernel per degree is what makes every loop here unroll,
+// every raw[] index a constant, and every accumulator a register instead of a
+// spill. A degree with no instantiation falls back to the w32 path above.
+//
+// Exactness is unchanged and is the reason for the shape of it:
+//   - operands are int32 only because the host already proved |A|,|B| < 2^31
+//     from the coefficients it wrote; narrowing is a representation change,
+//     not a rounding
+//   - every product is mul.wide.s32, 32x32 -> 64, and every accumulator is
+//     int64, so no product is ever truncated
+//   - R is applied once, at the end, in int64
+//   - there is no floating-point type, literal, or intrinsic in any of it, and
+//     the PTX is scanned for float instructions before it is allowed to load
+// ===========================================================================
+
+#define UT 16     // output tile edge: 16x16 outputs per block
+#define UK 16     // k-depth staged per step
+
+// Shared memory is indexed by hand rather than with a 3-D array so the two
+// padding strides can be chosen against the 32 banks:
+//   S  = DEG+1  -- plane stride. Odd for even DEG, so the 16 threads of a tile
+//                  row hit 16 distinct banks when they read their own planes.
+//   KS = UT*S+1 -- k stride. Coprime to 32, so the 16 threads that each stage
+//                  a different k index also hit distinct banks. Without the
+//                  +1 the stride is a multiple of 16 and the store collapses
+//                  onto two banks.
+// A is stored [u][row][p] and B as [u][col][q], which makes the compute-loop
+// read of A a 2-address broadcast and the read of B stride-S.
+
+template<int DEG>
+__device__ __forceinline__ void fused_w32_core(
+    const int*       __restrict__ A,   // DEG planes, each n x k, |A| < 2^31
+    const int*       __restrict__ B,   // DEG planes, each k x c, |B| < 2^31
+    long long*       __restrict__ C,   // DEG planes, each n x c
+    const int*       __restrict__ R,   // (2*DEG-1) x DEG reduction table
+    int n, int k, int c)
+{
+    const int NRAW = 2 * DEG - 1;
+    const int S    = DEG + 1;
+    const int KS   = UT * S + 1;
+
+    __shared__ int As[UK * KS];
+    __shared__ int Bs[UK * KS];
+    __shared__ int Rs[(2 * DEG - 1) * DEG];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int row = blockIdx.y * UT + ty;
+    const int col = blockIdx.x * UT + tx;
+    const int tid = ty * UT + tx;
+
+    // R is the same for every block and is tiny; stage it once.
+    if (tid < NRAW * DEG) Rs[tid] = R[tid];
+
+    long long raw[2 * DEG - 1];
+    #pragma unroll
+    for (int m = 0; m < NRAW; ++m) raw[m] = 0LL;
+
+    const long long aPlane = (long long)n * k;
+    const long long bPlane = (long long)k * c;
+
+    for (int t0 = 0; t0 < k; t0 += UK) {
+        const int aCol = t0 + tx;
+        const int bRow = t0 + ty;
+        const bool aOk = (row < n) && (aCol < k);
+        const bool bOk = (bRow < k) && (col < c);
+
+        const int* ap = A + (long long)row * k + aCol;
+        const int* bp = B + (long long)bRow * c + col;
+
+        #pragma unroll
+        for (int p = 0; p < DEG; ++p) {
+            As[tx * KS + ty * S + p] = aOk ? ap[p * aPlane] : 0;
+            Bs[ty * KS + tx * S + p] = bOk ? bp[p * bPlane] : 0;
+        }
+        __syncthreads();
+
+        #pragma unroll 4
+        for (int u = 0; u < UK; ++u) {
+            int a[DEG], b[DEG];
+            #pragma unroll
+            for (int p = 0; p < DEG; ++p) a[p] = As[u * KS + ty * S + p];
+            #pragma unroll
+            for (int q = 0; q < DEG; ++q) b[q] = Bs[u * KS + tx * S + q];
+            #pragma unroll
+            for (int p = 0; p < DEG; ++p) {
+                #pragma unroll
+                for (int q = 0; q < DEG; ++q)
+                    raw[p + q] += (long long)a[p] * (long long)b[q];  // mul.wide.s32
+            }
+        }
+        __syncthreads();
+    }
+
+    if (row < n && col < c) {
+        const long long idx = (long long)row * c + col;
+        const long long cPlane = (long long)n * c;
+        #pragma unroll
+        for (int t = 0; t < DEG; ++t) {
+            long long acc = 0LL;
+            #pragma unroll
+            for (int m = 0; m < NRAW; ++m) {
+                const int r = Rs[m * DEG + t];
+                if (r) acc += (long long)r * raw[m];
+            }
+            C[t * cPlane + idx] = acc;         // written once, never read back
+        }
+    }
+}
+
+#define ULTRA_KERNEL(DEG)                                                     \
+  extern "C" __global__ __launch_bounds__(UT * UT)                            \
+  void fused_w32_d##DEG(const int* __restrict__ A, const int* __restrict__ B, \
+                        long long* __restrict__ C, const int* __restrict__ R, \
+                        int n, int k, int c)                                  \
+  { fused_w32_core<DEG>(A, B, C, R, n, k, c); }
+
+ULTRA_KERNEL(1)    // Q(zeta_1), Q(zeta_2)
+ULTRA_KERNEL(2)    // Q(zeta_3), Q(zeta_4), Q(zeta_6)
+ULTRA_KERNEL(4)    // Q(zeta_8), Q(zeta_12)
+ULTRA_KERNEL(6)    // Q(zeta_7), Q(zeta_9), Q(zeta_14), Q(zeta_18)
+ULTRA_KERNEL(8)    // Q(zeta_24), Q(zeta_15), Q(zeta_16), Q(zeta_20), Q(zeta_30)
+ULTRA_KERNEL(10)
+ULTRA_KERNEL(12)
+ULTRA_KERNEL(16)
+
+// ===========================================================================
+// ULTRA-K: the same product with 3^L multiplies instead of 4^L.
+//
+// Measured on this device, fused_w32_d8 above costs about 0.55 ms per plane
+// product at 2048x2048 on top of 10 ms of fixed cost, and that cost is flat
+// against unroll factor and occupancy. Cutting the multiply count is the only
+// thing that moves it -- so cut the multiply count.
+//
+// Karatsuba does a length-2H convolution with three length-H ones:
+//     Z0 = a0 b0,  Z2 = a1 b1,  Z1 = (a0+a1)(b0+b1) - Z0 - Z2
+// and recursively deg = 2^L costs 3^L multiplies: 27 instead of 64 at deg 8,
+// 9 instead of 16 at deg 4, 81 instead of 256 at deg 16. Exactly -- every
+// coefficient of the result is the integer it would have been, because every
+// intermediate is an integer sum of integers. There is nothing here to round.
+//
+// Only the forming of the 3^L products is done on the device. The recombination
+// is linear, so Racket collapses it -- together with the Phi_n reduction --
+// into one deg x 3^L integer matrix K with out_t = sum_j K[t][j] P_j, derived
+// in karatsuba.rkt and checked there against cyc* . The device applies K once
+// per output element and unwinds no recursion of its own.
+//
+// The price is range, and it is paid in a checked certificate rather than
+// hoped for: each multiplicand is a sum of up to 2^L coefficients, so the host
+// must see 2^L max|A| and 2^L max|B| inside int32, and the output bound becomes
+// rowsum(K) * 4^L * k * maxA * maxB, with rowsum computed exactly (18 for
+// Q(zeta_24), not estimated). When that does not fit, the selector falls back
+// to fused_w32 above, which has the smaller bound and the larger multiply
+// count. Nothing is ever truncated to make it fit.
+// ===========================================================================
+
+template<int L> struct Pow3 { enum { v = 3 * Pow3<L-1>::v }; };
+template<>      struct Pow3<0> { enum { v = 1 }; };
+
+// Forms the 3^L products in the order karatsuba.rkt's kara-mac does: low half,
+// high half, sum half. Every index is a compile-time constant after unrolling,
+// so P[] and the partial sums stay in registers.
+template<int L> struct Kmac {
+    __device__ __forceinline__ static void go(const int* a, const int* b, long long* P)
+    {
+        const int H = 1 << (L - 1);
+        const int M = Pow3<L-1>::v;
+        int as[H], bs[H];
+        #pragma unroll
+        for (int z = 0; z < H; ++z) { as[z] = a[z] + a[z+H]; bs[z] = b[z] + b[z+H]; }
+        Kmac<L-1>::go(a,   b,   P);
+        Kmac<L-1>::go(a+H, b+H, P + M);
+        Kmac<L-1>::go(as,  bs,  P + 2*M);
+    }
+};
+template<> struct Kmac<0> {
+    __device__ __forceinline__ static void go(const int* a, const int* b, long long* P)
+    {
+        P[0] += (long long)a[0] * (long long)b[0];     // mul.wide.s32
+    }
+};
+
+template<int L>
+__device__ __forceinline__ void kara_w32_core(
+    const int*       __restrict__ A,   // DEG planes, each n x k
+    const int*       __restrict__ B,   // DEG planes, each k x c
+    long long*       __restrict__ C,   // DEG planes, each n x c
+    const int*       __restrict__ K,   // DEG x 3^L output matrix
+    int n, int k, int c)
+{
+    const int DEG = 1 << L;
+    const int NP  = Pow3<L>::v;
+    const int S   = DEG + 1;
+    const int KS  = UT * S + 1;
+
+    __shared__ int As[UK * KS];
+    __shared__ int Bs[UK * KS];
+    __shared__ int Ks[DEG * Pow3<L>::v];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int row = blockIdx.y * UT + ty;
+    const int col = blockIdx.x * UT + tx;
+    const int tid = ty * UT + tx;
+
+    for (int z = tid; z < DEG * NP; z += UT * UT) Ks[z] = K[z];
+
+    long long P[Pow3<L>::v];
+    #pragma unroll
+    for (int j = 0; j < NP; ++j) P[j] = 0LL;
+
+    const long long aPlane = (long long)n * k;
+    const long long bPlane = (long long)k * c;
+
+    for (int t0 = 0; t0 < k; t0 += UK) {
+        const int aCol = t0 + tx;
+        const int bRow = t0 + ty;
+        const bool aOk = (row < n) && (aCol < k);
+        const bool bOk = (bRow < k) && (col < c);
+
+        const int* ap = A + (long long)row * k + aCol;
+        const int* bp = B + (long long)bRow * c + col;
+
+        #pragma unroll
+        for (int p = 0; p < DEG; ++p) {
+            As[tx * KS + ty * S + p] = aOk ? ap[p * aPlane] : 0;
+            Bs[ty * KS + tx * S + p] = bOk ? bp[p * bPlane] : 0;
+        }
+        __syncthreads();
+
+        #pragma unroll 4
+        for (int u = 0; u < UK; ++u) {
+            int a[DEG], b[DEG];
+            #pragma unroll
+            for (int p = 0; p < DEG; ++p) a[p] = As[u * KS + ty * S + p];
+            #pragma unroll
+            for (int q = 0; q < DEG; ++q) b[q] = Bs[u * KS + tx * S + q];
+            Kmac<L>::go(a, b, P);
+        }
+        __syncthreads();
+    }
+
+    if (row < n && col < c) {
+        const long long idx = (long long)row * c + col;
+        const long long cPlane = (long long)n * c;
+        #pragma unroll
+        for (int t = 0; t < DEG; ++t) {
+            long long acc = 0LL;
+            #pragma unroll
+            for (int j = 0; j < NP; ++j) {
+                const int w = Ks[t * NP + j];
+                if (w) acc += (long long)w * P[j];
+            }
+            C[t * cPlane + idx] = acc;
+        }
+    }
+}
+
+#define KARA_KERNEL(L)                                                        \
+  extern "C" __global__ __launch_bounds__(UT * UT)                            \
+  void kara_w32_l##L(const int* __restrict__ A, const int* __restrict__ B,    \
+                     long long* __restrict__ C, const int* __restrict__ K,    \
+                     int n, int k, int c)                                     \
+  { kara_w32_core<L>(A, B, C, K, n, k, c); }
+
+KARA_KERNEL(1)   // deg 2  : 3 multiplies, not 4
+KARA_KERNEL(2)   // deg 4  : 9, not 16
+KARA_KERNEL(3)   // deg 8  : 27, not 64
+KARA_KERNEL(4)   // deg 16 : 81, not 256
