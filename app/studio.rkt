@@ -255,4 +255,14 @@
 (when gpu-ok? (new timer% [interval 900] [notify-callback poll]))
 
 (send frame show #t)
-(send fam set-value "pick a dimension and press EXECUTE.\n")
+(send fam set-value "starting the upward march automatically...\n")
+
+;; Auto-start the march on launch (climbs from d=2 upward, unbounded). The
+;; EXECUTE button still works, but nothing has to be clicked.
+(when gpu-ok?
+  (queue-callback
+   (lambda ()
+     (unless running
+       (send exec-btn enable #f)
+       (send exec-btn set-label "RUNNING -- press P to pause")
+       (start-execute 2)))))
