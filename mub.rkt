@@ -20,6 +20,7 @@
   [mubs-d2        (-> cyclofield? (listof (cons/c string? matrix?)))]
   [mubs-d3        (-> cyclofield? (listof (cons/c string? matrix?)))]
   [mubs-d4        (-> cyclofield? (listof (cons/c string? matrix?)))]
+  [mubs-d5        (-> cyclofield? (listof (cons/c string? matrix?)))]
   [mubs-d6        (-> (listof (cons/c string? matrix?)))]
   [mubs-d12       (-> (listof (cons/c string? matrix?)))]))
 
@@ -125,6 +126,20 @@
                         (if (= r c) (cyc-one f) (cyc-zero f))))))
    (for/list ([a (in-list T)] [k (in-naturals)])
      (cons (format "A~a" k) (basis-a a)))))
+
+(define (mubs-d5 f)
+  (define one (cyc-one f))
+  (define zero (cyc-zero f))
+  (define s (field-inv-sqrt f 5))
+  (define w (cyc-zeta f (quotient (cyclofield-n f) 5)))
+  (cons
+   (cons "Z" (mat f (for/list ([a (in-range 5)])
+                      (for/list ([b (in-range 5)]) (if (= a b) one zero)))))
+   (for/list ([k (in-range 5)])
+     (cons (format "B~a" k)
+           (mat f (for/list ([j (in-range 5)])
+                    (for/list ([m (in-range 5)])
+                      (cyc* s (cyc-expt w (modulo (+ (* k m m) (* j m)) 5))))))))))
 
 ;; ------------------------------------------------------------- dimension 12
 ;; d = 12 = 4 * 3, and 4 and 3 are coprime prime powers. Tensoring a k-set in

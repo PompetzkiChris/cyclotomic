@@ -13,7 +13,7 @@
          racket/string
          racket/contract
          racket/promise
-         (only-in math/number-theory coprime? totient)
+         (only-in math/number-theory coprime? totient prime?)
          "poly.rkt")
 
 ;; racket/base has exact-integer? but not exact-rational?; this is the guard
@@ -369,13 +369,29 @@
     (error 'field-sqrt "~a does not contain zeta_~a" f k))
   (cyc-zeta f (quotient n k)))
 
-;; sqrt2 = zeta_8 + zeta_8^-1 ; sqrt3 = zeta_12 + zeta_12^-1 ; sqrt6 = product
+;; The quadratic Gauss sum  g = sum_{k=0}^{p-1} zeta_p^(k^2)  equals sqrt(p) when
+;; p = 1 (mod 4) and i*sqrt(p) when p = 3 (mod 4). So sqrt(p) is exact in
+;; Q(zeta_p) for p = 1 (mod 4), and in Q(zeta_(4p)) otherwise.
+(define (gauss-sqrt f p)
+  (define z (primitive-root f p))
+  (define g
+    (for/fold ([acc (cyc-zero f)]) ([k (in-range p)])
+      (cyc-add2 acc (cyc-expt z (modulo (* k k) p)))))
+  (cond
+    [(= 1 (modulo p 4)) g]                                  ; g = sqrt(p)
+    [else (cyc-mul2 (cyc-expt (field-i f) 3) g)]))          ; g = i sqrt(p) -> sqrt(p) = -i g
+
+;; sqrt2 = zeta_8 + zeta_8^-1 ; sqrt3 = zeta_12 + zeta_12^-1 ; sqrt6 = product;
+;; every odd prime via its Gauss sum; composites by factoring.
 (define (field-sqrt f m)
   (case m
     [(2) (let ([z (primitive-root f 8)])  (cyc-add2 z (cyc-expt z 7)))]
     [(3) (let ([z (primitive-root f 12)]) (cyc-add2 z (cyc-expt z 11)))]
     [(6) (cyc-mul2 (field-sqrt f 2) (field-sqrt f 3))]
-    [else (error 'field-sqrt "sqrt(~a) not implemented" m)]))
+    [else
+     (cond
+       [(and (> m 2) (prime? m) (odd? m)) (gauss-sqrt f m)]
+       [else (error 'field-sqrt "sqrt(~a) not implemented" m)])]))
 
 (define (field-inv-sqrt f m)
   (cyc-scale (field-sqrt f m) (/ 1 m)))

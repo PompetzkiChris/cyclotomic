@@ -10,9 +10,10 @@
 ;; you return -- the core-burners are killed so the machine truly calms.
 
 (require "../field.rkt" "../matrix.rkt" "../mub.rkt"
-         "../exact-io.rkt"
+         "../exact-io.rkt" "../mub-general.rkt"
          "../cuda/driver.rkt" "../cuda/gpu.rkt" "../cuda/accel.rkt"
-         racket/place)
+         (only-in math/number-theory factorize)
+         racket/string racket/place)
 
 (define gpu-ok?
   (with-handlers ([(lambda (_) #t) (lambda (e) #f)])
@@ -22,17 +23,20 @@
 (define log-file  "C:\\ClaudeOutput\\math-results\\executioner_kills.log")
 (define hog-bytes (* 8192 8192 8 8))   ; one resident 8192^2 x 8-plane matrix = 4 GiB
 
-(define (build-mubs d)
-  (case d
-    [(2) (mubs-d2 (make-field 8))] [(3) (mubs-d3 (make-field 12))]
-    [(4) (mubs-d4 (make-field 24))] [(6) (mubs-d6)] [(12) (mubs-d12)]))
+(define (build-mubs d) (mubs-optimal d))
+(define (pp-str fs)
+  (string-join (for/list ([f (in-list fs)])
+                 (if (= 1 (cadr f)) (format "~a" (car f)) (format "~a^~a" (car f) (cadr f)))) " x "))
 (define (families-of d)
-  (case d
-    [(2) (list "d = 2  (prime)   qubit Pauli, eigenbases of Z, X, Y")]
-    [(3) (list "d = 3  (prime)   qutrit Heisenberg-Weyl over GF(3)")]
-    [(4) (list "d = 4 = 2^2      Galois ring GR(4,2) = Z4[xi], xi^3 = 1")]
-    [(6) (list "d = 6 = 2 x 3    qubit Pauli (d=2)  x  qutrit GF(3) (d=3)")]
-    [(12) (list "d = 12 = 4 x 3   Galois ring GR(4,2) (d=4)  x  qutrit GF(3) (d=3)")]))
+  (define fs (factorize d))
+  (if (= 1 (length fs))
+      (list (format "d = ~a = ~a   PRIME POWER -> complete set of ~a MUBs (solved)"
+                    d (pp-str fs) (optimal-count d)))
+      (cons (format "d = ~a = ~a   composite -> ~a MUBs (tensor bound; a 4th+ is open)"
+                    d (pp-str fs) (optimal-count d))
+            (for/list ([f (in-list fs)])
+              (define q (expt (car f) (cadr f)))
+              (format "   family: prime power ~a -> its complete set of ~a" q (add1 q))))))
 
 ;; auto-optimize VRAM: as many resident matrices as fit, minus headroom for the
 ;; running product and driver overhead
@@ -76,7 +80,7 @@
 
 (define ctl (new horizontal-panel% [parent root] [stretchable-height #f] [spacing 10] [alignment '(left center)]))
 (new message% [parent ctl] [label "Dimension:"])
-(define dim-choice (new choice% [parent ctl] [label ""] [choices (list "2" "3" "4" "6" "12")] [selection 0]))
+(define dim-choice (new choice% [parent ctl] [label ""] [choices (for/list ([d (in-range 2 17)]) (number->string d))] [selection 0]))
 (define exec-btn
   (new button% [parent ctl] [label "EXECUTE"] [enabled gpu-ok?]
        [callback (lambda (b e)
@@ -141,6 +145,9 @@
 (define (start-execute d)
   (set! running #t) (set! paused #f) (set! kills-done 0) (set! kt-sum 0) (set! bytes-written 0)
   (set! d-now d) (set! targets (targets-for d))
+  (define ALL (list 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))
+  (define start-idx (or (index-of ALL d) 0))
+  (define march (append (list-tail ALL start-idx) (take ALL start-idx)))
   (define nhog (auto-nhog))
   (send fam set-value
         (string-append
@@ -173,35 +180,44 @@
                  (call-with-output-file disk-file #:exists 'replace (lambda (o) (write-bytes bs o)))
                  (set! bytes-written (+ bytes-written (bytes-length bs)))))
              (loop (add1 i))])))))
-    ;; kill sweep, looped so kills keep flowing while the machine is pinned
-    (let pass ()
+    ;; MARCH through the dimensions in order, killing every pair of each family,
+    ;; then advancing. Loops the whole march while the machine stays pinned.
+    (let big ()
       (when running
-        (define ms (parameterize ([current-mat*-hook #f]) (map cdr (build-mubs d))))
-        (for ([t (in-list targets)] [k (in-naturals)] #:break (not running))
-          (wait-while-paused)
-          (when running
-            (queue-callback (lambda () (vector-set! t 3 'live) (send kill-canvas refresh)))
-            (define kt0 (now-ms))
-            (define v (parameterize ([current-mat*-hook #f])
-                        (unbiasedness (list-ref ms (vector-ref t 1)) (list-ref ms (vector-ref t 2)))))
-            (sleep 0.5)
-            (set! kills-done (add1 kills-done)) (set! kt-sum (+ kt-sum (- (now-ms) kt0)))
-            (with-handlers ([(lambda (_) #t) void])
-              (call-with-output-file log-file #:exists 'append
-                (lambda (o) (fprintf o "d=~a  ~a  |<.,.>|^2=~a  ~a\n"
-                                     d (vector-ref t 0) v (if (equal? v (/ 1 d)) "OK" "FAIL")))))
-            (define avg (quotient kt-sum kills-done))
-            (define left (- (length targets) (add1 k)))
-            (queue-callback (lambda ()
-              (vector-set! t 3 'killed)
-              (vector-set! t 4 (if (equal? v (/ 1 d)) (format "1/~a" d) (format "~a NOT 1/~a" v d)))
-              (send score set-label (format "~a killed" kills-done))
-              (send eta set-label (format "family d=~a:  ~a left this pass   ETA ~a   ·   ~a exact so far"
-                                          d left (mmss (* left avg)) kills-done))
-              (send kill-canvas refresh)))))
-        (when running
-          (for ([t (in-list targets)]) (vector-set! t 3 'pending))
-          (pass)))))))
+        (for ([dd (in-list march)] #:break (not running))
+          (define tg (targets-for dd))
+          (queue-callback (lambda ()
+            (set! d-now dd) (set! targets tg)
+            (send fam set-value
+                  (string-append
+                   (apply string-append (map (lambda (s) (string-append s "\n")) (families-of dd)))
+                   (format "\ntensor bases:  ~a\n" (map car (build-mubs dd)))
+                   (format "targets: ~a pairs, each |<Bi,Bj>|^2 must be exactly 1/~a\n" (length tg) dd)))
+            (send kill-canvas refresh)))
+          (define ms (parameterize ([current-mat*-hook #f]) (map cdr (build-mubs dd))))
+          (for ([t (in-list tg)] [k (in-naturals)] #:break (not running))
+            (wait-while-paused)
+            (when running
+              (queue-callback (lambda () (vector-set! t 3 'live) (send kill-canvas refresh)))
+              (define kt0 (now-ms))
+              (define v (parameterize ([current-mat*-hook #f])
+                          (unbiasedness (list-ref ms (vector-ref t 1)) (list-ref ms (vector-ref t 2)))))
+              (sleep 0.5)
+              (set! kills-done (add1 kills-done)) (set! kt-sum (+ kt-sum (- (now-ms) kt0)))
+              (with-handlers ([(lambda (_) #t) void])
+                (call-with-output-file log-file #:exists 'append
+                  (lambda (o) (fprintf o "d=~a  ~a  |<.,.>|^2=~a  ~a\n"
+                                       dd (vector-ref t 0) v (if (equal? v (/ 1 dd)) "OK" "FAIL")))))
+              (define avg (quotient kt-sum kills-done))
+              (define left (- (length tg) (add1 k)))
+              (queue-callback (lambda ()
+                (vector-set! t 3 'killed)
+                (vector-set! t 4 (if (equal? v (/ 1 dd)) (format "1/~a" dd) (format "~a NOT 1/~a" v dd)))
+                (send score set-label (format "~a killed" kills-done))
+                (send eta set-label (format "MARCH  d=~a:  ~a left in family   ETA ~a   ·   ~a exact total"
+                                            dd left (mmss (* left avg)) kills-done))
+                (send kill-canvas refresh))))))
+        (big))))))
 
 ;; ---- meters ---------------------------------------------------------------
 (define (sh cmd) (with-handlers ([(lambda (_) #t) (lambda (e) "")])
